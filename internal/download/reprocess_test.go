@@ -122,6 +122,29 @@ func TestFailedTransferWaitsForInFlightFiles(t *testing.T) {
 	}
 }
 
+// A transfer that reports no files must end up tracked as Failed. Previously
+// FailTransfer ran before the context existed, so it silently did nothing and
+// the transfer was re-examined on every poll forever.
+func TestTransferWithNoFilesIsMarkedFailed(t *testing.T) {
+	m := newManagerForTest(t, &fakeClient{
+		files: func(int64) ([]*putio.File, error) { return nil, nil },
+	})
+	transfer := &putio.Transfer{ID: 1, Name: "empty", Status: "COMPLETED", SaveParentID: testFolderID, FileID: 100}
+
+	m.processor.processTransfer(transfer)
+
+	ctx, ok := m.coordinator.GetTransferContext(transfer.ID)
+	if !ok {
+		t.Fatal("expected the empty transfer to be tracked")
+	}
+	if state := ctx.GetState(); state != TransferLifecycleFailed {
+		t.Errorf("expected Failed state, got %s", state)
+	}
+	if err := ctx.GetError(); err == nil {
+		t.Error("expected the failure reason to be recorded")
+	}
+}
+
 // RemoveTransfer must drop every piece of local bookkeeping, otherwise the
 // maps grow for the lifetime of the process.
 func TestRemoveTransferClearsAllBookkeeping(t *testing.T) {

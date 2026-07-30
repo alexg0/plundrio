@@ -33,14 +33,15 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		Tag       interface{}     `json:"tag,omitempty"`
 	}
 
-	// Handle GET method for session-get
-	if r.Method == http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		// A bare GET is treated as session-get.
 		req.Method = "session-get"
 		log.Debug("rpc").
 			Str("client_addr", r.RemoteAddr).
 			Str("method", "GET").
 			Msg("GET request converted to session-get")
-	} else if r.Method == http.MethodPost {
+	case http.MethodPost:
 		// Parse RPC request for POST method
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			log.Error("rpc").
@@ -56,7 +57,7 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 			Str("method", "POST").
 			Str("rpc_method", req.Method).
 			Msg("Decoded RPC request")
-	} else {
+	default:
 		log.Error("rpc").
 			Str("client_addr", r.RemoteAddr).
 			Str("method", r.Method).

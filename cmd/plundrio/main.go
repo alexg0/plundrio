@@ -49,7 +49,9 @@ var runCmd = &cobra.Command{
 		}
 
 		// Bind flags to Viper
-		viper.BindPFlags(cmd.Flags())
+		if err := viper.BindPFlags(cmd.Flags()); err != nil {
+			log.Fatal("config").Err(err).Msg("Failed to bind flags")
+		}
 
 		// Set log level from env/config/flag (in that order)
 		logLevel := viper.GetString("log-level")
@@ -100,7 +102,7 @@ var runCmd = &cobra.Command{
 
 		if targetDir == "" || putioFolder == "" || oauthToken == "" {
 			log.Error("config").Msg("Not all required configuration values were provided")
-			cmd.Usage()
+			_ = cmd.Usage()
 			os.Exit(1)
 		}
 
@@ -256,7 +258,7 @@ var getTokenCmd = &cobra.Command{
 		if err != nil {
 			log.Fatal("auth").Err(err).Msg("Failed to get OOB code")
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		var codeResponse struct {
 			Code      string `json:"code"`
@@ -291,10 +293,10 @@ var getTokenCmd = &cobra.Command{
 					Status     string `json:"status"`
 				}
 				if err := json.NewDecoder(tokenResp.Body).Decode(&tokenResult); err != nil {
-					tokenResp.Body.Close()
+					_ = tokenResp.Body.Close()
 					continue
 				}
-				tokenResp.Body.Close()
+				_ = tokenResp.Body.Close()
 
 				if tokenResult.Status == "OK" && tokenResult.OAuthToken != "" {
 					log.Info("auth").

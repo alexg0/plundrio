@@ -429,8 +429,18 @@ func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
 	}
 
 	if len(files) == 0 {
-		err := NewNoFilesFoundError(transfer.ID)
-		p.manager.coordinator.FailTransfer(transfer.ID, err)
+		// Initialise before failing: FailTransfer needs a tracked context, so
+		// doing this the other way round silently did nothing and left the
+		// transfer to be re-examined on every poll forever.
+		if !p.initializeTransfer(transfer, 0) {
+			return
+		}
+		if err := p.manager.coordinator.FailTransfer(transfer.ID, NewNoFilesFoundError(transfer.ID)); err != nil {
+			log.Error("transfers").
+				Int64("transfer_id", transfer.ID).
+				Err(err).
+				Msg("Failed to mark transfer as failed")
+		}
 		return
 	}
 
@@ -448,7 +458,12 @@ func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
 			Str("name", transfer.Name).
 			Int64("id", transfer.ID).
 			Msg("All files already exist, completing transfer")
-		p.manager.coordinator.CompleteTransfer(transfer.ID)
+		if err := p.manager.coordinator.CompleteTransfer(transfer.ID); err != nil {
+			log.Error("transfers").
+				Int64("transfer_id", transfer.ID).
+				Err(err).
+				Msg("Failed to complete transfer whose files already exist")
+		}
 		return
 	}
 }
@@ -585,7 +600,12 @@ func (p *TransferProcessor) initializeTransfer(transfer *putio.Transfer, filesTo
 			Int64("id", transfer.ID).
 			Err(err).
 			Msg("Failed to start transfer download")
-		p.manager.coordinator.FailTransfer(transfer.ID, err)
+		if failErr := p.manager.coordinator.FailTransfer(transfer.ID, err); failErr != nil {
+			log.Error("transfers").
+				Int64("id", transfer.ID).
+				Err(failErr).
+				Msg("Failed to mark transfer as failed")
+		}
 		return false
 	}
 
