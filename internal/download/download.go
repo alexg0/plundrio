@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +84,12 @@ func (m *Manager) downloadWithRetry(state *DownloadState) error {
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if err := m.downloadFile(state); err != nil {
+			// Undo this attempt's contribution to the transfer total. The next
+			// attempt restarts its byte accounting from zero, so without this
+			// the bytes it already reported would be counted twice and
+			// progress could climb past 100%.
+			m.rollbackAttemptBytes(state)
+
 			// Check for cancellation first - pass it through without wrapping
 			if downloadErr, ok := err.(*DownloadError); ok && downloadErr.Type == "DownloadCancelled" {
 				return err
@@ -107,14 +114,46 @@ func (m *Manager) downloadWithRetry(state *DownloadState) error {
 	return fmt.Errorf("failed after %d attempts, last error: %w", maxRetries, lastErr)
 }
 
-// isTransientError determines if an error is potentially recoverable
+// rollbackAttemptBytes subtracts the bytes a failed attempt reported to the
+// transfer total and resets the per-file counter, so a retry starts clean.
+func (m *Manager) rollbackAttemptBytes(state *DownloadState) {
+	state.mu.Lock()
+	contributed := state.downloaded
+	state.downloaded = 0
+	state.Progress = 0
+	state.mu.Unlock()
+
+	if contributed <= 0 {
+		return
+	}
+	if transferCtx, exists := m.coordinator.GetTransferContext(state.TransferID); exists {
+		transferCtx.AddDownloadedBytes(-contributed)
+		log.Debug("download").
+			Str("file_name", state.Name).
+			Int64("transfer_id", state.TransferID).
+			Int64("rolled_back", contributed).
+			Msg("Rolled back bytes from failed download attempt")
+	}
+}
+
+// isTransientError reports whether an error is worth retrying.
+//
+// Matching is by substring over the whole error chain, because callers wrap
+// ("download failed: %w") and grab and net/http report most of these as plain
+// errors with no sentinel to compare against. The phrases are deliberately
+// spelled out rather than using bare status codes: matching "503" would also
+// fire on a path like "/downloads/500 Days of Summer".
 func isTransientError(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	// Check for cancellation errors - these should be passed through
-	if downloadErr, ok := err.(*DownloadError); ok && downloadErr.Type == "DownloadCancelled" {
+	// Cancellation is deliberate, never transient.
+	var downloadErr *DownloadError
+	if errors.As(err, &downloadErr) && downloadErr.Type == "DownloadCancelled" {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 
@@ -122,6 +161,7 @@ func isTransientError(err error) bool {
 		return true
 	}
 
+	// Any network timeout is retryable regardless of how it is worded.
 	var networkError net.Error
 	if errors.As(err, &networkError) && networkError.Timeout() {
 		return true
@@ -219,8 +259,19 @@ func (m *Manager) downloadFile(state *DownloadState) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Create grab client with our configuration
+	// grab's default client sets no timeouts at all, so a server that accepts
+	// the connection and then goes quiet would hang this worker forever.
+	// Note: no http.Client.Timeout — that is a whole-request deadline and
+	// would kill long but healthy downloads. Stalls are caught by the
+	// progress monitor instead.
 	client := grab.NewClient()
+	client.HTTPClient = &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			IdleConnTimeout:       m.dlConfig.IdleConnectionTimeout,
+			ResponseHeaderTimeout: m.dlConfig.DownloadHeaderTimeout,
+		},
+	}
 
 	// Create grab request
 	req, err := grab.NewRequest(targetPath, url)
@@ -247,6 +298,7 @@ func (m *Manager) downloadFile(state *DownloadState) error {
 
 	// Set up progress tracking
 	done := make(chan struct{})
+	monitorStopped := make(chan struct{})
 	progressTicker := time.NewTicker(m.dlConfig.ProgressUpdateInterval)
 	defer progressTicker.Stop()
 
@@ -257,13 +309,22 @@ func (m *Manager) downloadFile(state *DownloadState) error {
 	state.LastProgress = time.Now()
 	state.mu.Unlock()
 
-	// Monitor download progress
-	go m.monitorGrabDownloadProgress(ctx, state, resp, done, progressTicker)
+	// Monitor download progress. stopMonitor blocks until the monitor has
+	// exited, so no progress update can land after we settle the byte
+	// accounting below (or after a caller rolls this attempt back).
+	go func() {
+		defer close(monitorStopped)
+		m.trackDownloadProgress(ctx, state, resp, done, progressTicker, cancel)
+	}()
+	stopMonitor := func() {
+		close(done)
+		<-monitorStopped
+	}
 
 	// Wait for completion or cancellation
 	select {
 	case <-resp.Done:
-		close(done)
+		stopMonitor()
 		// Check for errors
 		if err := resp.Err(); err != nil {
 			if ctx.Err() != nil {
@@ -316,7 +377,7 @@ func (m *Manager) downloadFile(state *DownloadState) error {
 		return nil
 
 	case <-ctx.Done():
-		close(done)
+		stopMonitor()
 		return NewDownloadCancelledError(state.Name, "context cancelled")
 	}
 }

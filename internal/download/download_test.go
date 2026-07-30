@@ -1,6 +1,7 @@
 package download
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,14 @@ type temporaryOnlyError struct{}
 func (temporaryOnlyError) Error() string   { return "temporary network error" }
 func (temporaryOnlyError) Timeout() bool   { return false }
 func (temporaryOnlyError) Temporary() bool { return true }
+
+// timeoutError implements net.Error as a timeout, standing in for the various
+// concrete timeout types the net stack returns.
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "operation took too long" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
 
 func TestIsTransientError(t *testing.T) {
 	tests := []struct {
@@ -91,9 +100,42 @@ func TestIsTransientError(t *testing.T) {
 			want: false,
 		},
 		{
+			// Every call site wraps, so wrapped errors must still be detected.
 			name: "wrapped_connection_reset",
 			err:  fmt.Errorf("request failed: %w", errors.New("connection reset")),
 			want: true,
+		},
+		{
+			name: "doubly_wrapped_connection_reset",
+			err: fmt.Errorf("download failed: %w",
+				fmt.Errorf("request failed: %w", errors.New("connection reset"))),
+			want: true,
+		},
+		{
+			// What grab reports for a truncated response body.
+			name: "truncated_body",
+			err:  errors.New("download failed: unexpected EOF"),
+			want: true,
+		},
+		{
+			name: "matching_is_case_insensitive",
+			err:  errors.New("Connection Reset By Peer"),
+			want: true,
+		},
+		{
+			name: "net_timeout_error",
+			err:  fmt.Errorf("dialing: %w", timeoutError{}),
+			want: true,
+		},
+		{
+			name: "context_canceled_is_not_transient",
+			err:  fmt.Errorf("download failed: %w", context.Canceled),
+			want: false,
+		},
+		{
+			name: "wrapped_cancellation_is_not_transient",
+			err:  fmt.Errorf("worker stopping: %w", NewDownloadCancelledError("a.mkv", "shutdown")),
+			want: false,
 		},
 	}
 

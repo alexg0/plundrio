@@ -24,9 +24,6 @@ type DownloadConfig struct {
 
 	// DownloadStallTimeout is how long a download can stall before being cancelled
 	DownloadStallTimeout time.Duration
-
-	// CopyTimeout is the timeout for waiting for the copy operation to complete after cancellation
-	CopyTimeout time.Duration
 }
 
 // GetDefaultConfig returns a DownloadConfig with reasonable default values
@@ -39,6 +36,5 @@ func GetDefaultConfig() *DownloadConfig {
 		IdleConnectionTimeout:  90 * time.Second, // Keep idle connections for 90 seconds
 		DownloadHeaderTimeout:  30 * time.Second, // 30 second timeout for response headers
 		DownloadStallTimeout:   2 * time.Minute,  // Cancel download if stalled for 2 minutes
-		CopyTimeout:            10 * time.Second, // Wait 10 seconds for copy to complete after cancellation
 	}
 }
