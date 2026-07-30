@@ -7,8 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "net/http/pprof"
-
 	"github.com/elsbrock/go-putio"
 	"github.com/elsbrock/plundrio/internal/config"
 	"github.com/elsbrock/plundrio/internal/download"
@@ -27,13 +25,16 @@ type PutioClient interface {
 }
 
 // DownloadService abstracts the download manager for the RPC server.
+//
+// Lifecycle (Start/Stop) is deliberately absent: main owns it. The server
+// only queries and removes transfers.
 type DownloadService interface {
 	GetTransfers() []*putio.Transfer
 	GetTransferContext(transferID int64) (*download.TransferContext, bool)
 	SetCategory(transferID int64, category string)
 	GetCategory(transferID int64) string
 	RemoveCategory(transferID int64)
-	Stop()
+	RemoveTransfer(transferID int64)
 }
 
 // Server handles transmission-rpc requests
@@ -43,6 +44,7 @@ type Server struct {
 	srv          *http.Server
 	quotaTicker  *time.Ticker
 	stopChan     chan struct{}
+	stopOnce     sync.Once
 	dlService    DownloadService
 	quotaWarning atomic.Bool // tracks if we've already warned about quota
 
@@ -114,13 +116,15 @@ func (s *Server) Start() error {
 	return s.srv.ListenAndServe()
 }
 
-// Stop gracefully shuts down the server
+// Stop gracefully shuts down the server.
+//
+// The download manager is not stopped here: main owns its lifecycle and stops
+// it after the server has stopped accepting requests.
 func (s *Server) Stop() error {
-	s.quotaTicker.Stop()
-	close(s.stopChan)
-
-	// Stop the download service
-	s.dlService.Stop()
+	s.stopOnce.Do(func() {
+		s.quotaTicker.Stop()
+		close(s.stopChan)
+	})
 
 	if s.srv != nil {
 		return s.srv.Close()

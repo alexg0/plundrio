@@ -183,14 +183,14 @@ var runCmd = &cobra.Command{
 			Str("signal", sig.String()).
 			Msg("Received signal, shutting down...")
 
-		// Cleanup and exit
-		log.Info("shutdown").Msg("Stopping download manager...")
-		dlManager.Stop()
-
+		// Stop accepting RPC requests first, then drain in-flight downloads.
 		log.Info("shutdown").Msg("Stopping server...")
 		if err := srv.Stop(); err != nil {
 			log.Error("shutdown").Err(err).Msg("Error stopping server")
 		}
+
+		log.Info("shutdown").Msg("Stopping download manager...")
+		dlManager.Stop()
 	},
 }
 

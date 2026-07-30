@@ -311,7 +311,7 @@ func (p *TransferProcessor) processReadyTransfers(byStatus transfersByStatus) {
 			log.Debug("transfers").Msg("Stopping transfer processing")
 			return
 		default:
-			if p.isTransferBeingProcessed(transfer.ID) {
+			if !p.shouldProcess(transfer) {
 				continue
 			}
 			if !CanStartDownloadNow(p.manager.cfg.DownloadStartWindow, now) {
@@ -328,15 +328,74 @@ func (p *TransferProcessor) processReadyTransfers(byStatus transfersByStatus) {
 	}
 }
 
-// isTransferBeingProcessed checks if a transfer is already being handled
-func (p *TransferProcessor) isTransferBeingProcessed(transferID int64) bool {
-	if _, exists := p.manager.coordinator.GetTransferContext(transferID); exists {
-		log.Debug("transfers").
-			Int64("transfer_id", transferID).
-			Msg("Transfer already being processed")
+// maxReprocessAttempts bounds how often a transfer whose local download
+// failed is re-attempted, mirroring maxRetryAttempts for errored put.io
+// transfers. Without a bound, a permanently broken file (a 404, a full disk)
+// would be retried on every poll forever.
+const maxReprocessAttempts = 3
+
+// shouldProcess reports whether a ready transfer needs processing.
+//
+// An untracked transfer is new. A tracked one is normally left alone — it is
+// either in flight or already done. The exception is a failed transfer: its
+// context is dropped so the next poll sees it as new, up to
+// maxReprocessAttempts times. Previously a failed transfer stayed tracked
+// forever, so it was never retried, its put.io file was never cleaned up, and
+// *arr never saw it complete.
+func (p *TransferProcessor) shouldProcess(transfer *putio.Transfer) bool {
+	ctx, exists := p.manager.coordinator.GetTransferContext(transfer.ID)
+	if !exists {
 		return true
 	}
-	return false
+
+	if ctx.GetState() != TransferLifecycleFailed {
+		log.Debug("transfers").
+			Int64("transfer_id", transfer.ID).
+			Str("state", ctx.GetState().String()).
+			Msg("Transfer already being processed")
+		return false
+	}
+
+	// Wait for the transfer to settle: retrying while siblings are still
+	// downloading would queue a second generation of the same files.
+	if active := p.manager.activeFileCount(transfer.ID); active > 0 {
+		log.Debug("transfers").
+			Int64("transfer_id", transfer.ID).
+			Int("active_files", active).
+			Msg("Failed transfer still has downloads in flight, deferring retry")
+		return false
+	}
+
+	attempts := 0
+	if v, ok := p.reprocessAttempts.Load(transfer.ID); ok {
+		attempts = v.(int)
+	}
+	if attempts >= maxReprocessAttempts {
+		log.Debug("transfers").
+			Int64("transfer_id", transfer.ID).
+			Str("name", transfer.Name).
+			Int("attempts", attempts).
+			Msg("Failed transfer exhausted reprocess attempts, leaving it alone")
+		return false
+	}
+
+	p.reprocessAttempts.Store(transfer.ID, attempts+1)
+	p.manager.coordinator.RemoveTransfer(transfer.ID)
+
+	log.Info("transfers").
+		Int64("transfer_id", transfer.ID).
+		Str("name", transfer.Name).
+		Int("attempt", attempts+1).
+		Int("max_attempts", maxReprocessAttempts).
+		Msg("Retrying transfer whose local download failed")
+	return true
+}
+
+// forget drops all local bookkeeping for a transfer.
+func (p *TransferProcessor) forget(transferID int64) {
+	p.manager.coordinator.RemoveTransfer(transferID)
+	p.retryAttempts.Delete(transferID)
+	p.reprocessAttempts.Delete(transferID)
 }
 
 // startTransferProcessing begins processing a transfer

@@ -104,6 +104,25 @@ func (m *Manager) localCategory(transferID int64) string {
 	return m.categories.Get(transferID)
 }
 
+// RemoveTransfer stops tracking a transfer and drops its local bookkeeping.
+// Called once *arr removes the torrent; without it, tracking state would grow
+// for the lifetime of the process.
+func (m *Manager) RemoveTransfer(transferID int64) {
+	m.processor.forget(transferID)
+}
+
+// activeFileCount returns how many of a transfer's files are still downloading.
+func (m *Manager) activeFileCount(transferID int64) int {
+	count := 0
+	m.activeFiles.Range(func(_, value interface{}) bool {
+		if value.(int64) == transferID {
+			count++
+		}
+		return true
+	})
+	return count
+}
+
 // New creates a new download manager
 func New(cfg *config.Config, client PutioClient) *Manager {
 	// Get default download configuration
@@ -321,15 +340,7 @@ func (m *Manager) handleFileCompletion(transferID int64, fileID int64) {
 
 	// If the transfer is in completed state, check if all downloads are done
 	if state == TransferLifecycleCompleted {
-		// Count active files for this transfer
-		activeCount := 0
-		m.activeFiles.Range(func(key, value interface{}) bool {
-			fileTransferID := value.(int64)
-			if fileTransferID == transferID {
-				activeCount++
-			}
-			return true
-		})
+		activeCount := m.activeFileCount(transferID)
 
 		log.Debug("transfers").
 			Int64("id", transferID).

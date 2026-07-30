@@ -445,8 +445,9 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 			}
 		}
 
-		// Clean up category mapping
+		// Drop all local tracking for this transfer now that *arr is done with it.
 		s.dlService.RemoveCategory(transfer.ID)
+		s.dlService.RemoveTransfer(transfer.ID)
 	}
 
 	return struct{}{}, nil

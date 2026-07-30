@@ -294,6 +294,19 @@ func (tc *TransferCoordinator) FailTransfer(transferID int64, err error) error {
 	return nil
 }
 
+// RemoveTransfer stops tracking a transfer, dropping its context.
+//
+// Two callers: torrent-remove, once *arr no longer needs the transfer, and
+// the reprocessing path, which drops a failed transfer's context so the next
+// poll treats it as new. Removing a context that is not tracked is a no-op.
+func (tc *TransferCoordinator) RemoveTransfer(transferID int64) {
+	if _, ok := tc.transfers.LoadAndDelete(transferID); ok {
+		log.Debug("transfer").
+			Int64("id", transferID).
+			Msg("Removed transfer from tracking")
+	}
+}
+
 // GetTransferContext safely retrieves a transfer context
 func (tc *TransferCoordinator) GetTransferContext(transferID int64) (*TransferContext, bool) {
 	if value, ok := tc.transfers.Load(transferID); ok {

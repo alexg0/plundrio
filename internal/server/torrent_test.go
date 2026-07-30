@@ -65,7 +65,8 @@ func (c *torrentAddClient) DeleteTransfer(context.Context, int64) error {
 }
 
 type torrentAddDownloadService struct {
-	categories map[int64]string
+	categories       map[int64]string
+	removedTransfers []int64
 }
 
 func (s *torrentAddDownloadService) GetTransfers() []*putio.Transfer {
@@ -91,7 +92,9 @@ func (s *torrentAddDownloadService) RemoveCategory(transferID int64) {
 	delete(s.categories, transferID)
 }
 
-func (s *torrentAddDownloadService) Stop() {}
+func (s *torrentAddDownloadService) RemoveTransfer(transferID int64) {
+	s.removedTransfers = append(s.removedTransfers, transferID)
+}
 
 func TestHandleTorrentAddReturnsMagnetTrackingFields(t *testing.T) {
 	client := &torrentAddClient{

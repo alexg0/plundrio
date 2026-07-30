@@ -59,7 +59,8 @@ func (m *mockPutioClient) DeleteTransfer(ctx context.Context, transferID int64) 
 
 // mockDownloadService records category bookkeeping made by the RPC server.
 type mockDownloadService struct {
-	categories map[int64]string
+	categories       map[int64]string
+	removedTransfers []int64
 }
 
 func newMockDownloadService() *mockDownloadService {
@@ -80,7 +81,9 @@ func (d *mockDownloadService) GetCategory(transferID int64) string { return d.ca
 
 func (d *mockDownloadService) RemoveCategory(transferID int64) { delete(d.categories, transferID) }
 
-func (d *mockDownloadService) Stop() {}
+func (d *mockDownloadService) RemoveTransfer(transferID int64) {
+	d.removedTransfers = append(d.removedTransfers, transferID)
+}
 
 func newTestServer(cfg *config.Config, client PutioClient, dl DownloadService) *Server {
 	return &Server{
