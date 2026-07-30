@@ -22,20 +22,20 @@ schema = 3
     hash = 'sha256-XWlYH0c8IcxAwQTnIi6WYqq44nOKUylSWxWO/vi+8pE='
 
   [mod.'github.com/mattn/go-colorable']
-    version = 'v0.1.13'
-    hash = 'sha256-qb3Qbo0CELGRIzvw7NVM1g/aayaz4Tguppk9MD2/OI8='
+    version = 'v0.1.14'
+    hash = 'sha256-JC60PjKj7MvhZmUHTZ9p372FV72I9Mxvli3fivTbxuA='
 
   [mod.'github.com/mattn/go-isatty']
-    version = 'v0.0.19'
-    hash = 'sha256-wYQqGxeqV3Elkmn26Md8mKZ/viw598R4Ych3vtt72YE='
+    version = 'v0.0.20'
+    hash = 'sha256-qhw9hWtU5wnyFyuMbKx+7RB8ckQaFQ8D+8GKPkN3HHQ='
 
   [mod.'github.com/pelletier/go-toml/v2']
     version = 'v2.2.4'
     hash = 'sha256-8qQIPldbsS5RO8v/FW/se3ZsAyvLzexiivzJCbGRg2Q='
 
   [mod.'github.com/rs/zerolog']
-    version = 'v1.34.0'
-    hash = 'sha256-M503WwzPvqbOas3f70FQNXoWG17eV/XU6FubtB6P0uo='
+    version = 'v1.35.1'
+    hash = 'sha256-JMry/37tnOV0ZUCeWRsduxb3WehvbLxUUZfF2l+Cz/s='
 
   [mod.'github.com/sagikazarmark/locafero']
     version = 'v0.11.0'
@@ -74,8 +74,8 @@ schema = 3
     hash = 'sha256-NkGFiDPoCxbr3LFsI6OCygjjkY0rdmg5ggvVVwpyDQ4='
 
   [mod.'golang.org/x/oauth2']
-    version = 'v0.35.0'
-    hash = 'sha256-QeleoXu+9K3LJZiw6/iPR+EQzi/OLDBTFdrP2/d1XN8='
+    version = 'v0.36.0'
+    hash = 'sha256-evS7WkMrpgonmTcqtWFpC5rSKZN8O+vnAhNUs1MS9kw='
 
   [mod.'golang.org/x/sys']
     version = 'v0.29.0'
