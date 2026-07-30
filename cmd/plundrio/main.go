@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"os/signal"
@@ -167,7 +168,9 @@ var runCmd = &cobra.Command{
 			log.Info("server").
 				Str("addr", cfg.ListenAddr).
 				Msg("Starting transmission-rpc server")
-			if err := srv.Start(); err != nil {
+			// ErrServerClosed is the expected result of a graceful shutdown,
+			// not a failure — treating it as fatal would exit(1) on every SIGTERM.
+			if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Fatal("server").Err(err).Msg("Server error")
 			}
 		}()
