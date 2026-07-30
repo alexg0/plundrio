@@ -28,10 +28,7 @@ func (m *Manager) downloadWorker() {
 			// Immediate shutdown requested
 			log.Info("download").Msg("Worker stopping due to shutdown request")
 			return
-		case job, ok := <-m.jobs:
-			if !ok {
-				return
-			}
+		case job := <-m.jobs:
 			state := &DownloadState{
 				FileID:     job.FileID,
 				Name:       job.Name,

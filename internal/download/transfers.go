@@ -347,17 +347,16 @@ func (p *TransferProcessor) startTransferProcessing(transfer *putio.Transfer) {
 		Int64("id", transfer.ID).
 		Msg("Found ready transfer")
 
-	p.manager.workerWg.Add(1)
+	p.manager.processorWg.Add(1)
 	transferCopy := *transfer
 	go func() {
+		defer p.manager.processorWg.Done()
 		p.processTransfer(&transferCopy)
 	}()
 }
 
 // processTransfer handles downloading of a completed or seeding transfer
 func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
-	defer p.manager.workerWg.Done()
-
 	log.Debug("transfers").
 		Str("name", transfer.Name).
 		Int64("id", transfer.ID).

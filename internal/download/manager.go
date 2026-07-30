@@ -42,11 +42,17 @@ type Manager struct {
 	stopChan chan struct{}
 	stopOnce sync.Once
 
-	workerWg  sync.WaitGroup // tracks worker goroutines
-	monitorWg sync.WaitGroup // tracks monitor goroutine
+	// Shutdown happens in dependency order: the monitor spawns transfer
+	// processors, which queue jobs for the workers.
+	monitorWg   sync.WaitGroup // tracks the transfer monitor goroutine
+	processorWg sync.WaitGroup // tracks per-transfer processing goroutines
+	workerWg    sync.WaitGroup // tracks download worker goroutines
 
-	jobs    chan downloadJob
-	mu      sync.Mutex // protects job queueing
+	// jobs is never closed; workers wind down via stopChan. Closing it would
+	// panic any in-flight QueueDownload racing the shutdown.
+	jobs chan downloadJob
+
+	mu      sync.Mutex // guards running
 	running bool       // tracks if manager is running
 
 	processor *TransferProcessor // Handles transfer processing
@@ -198,43 +204,42 @@ func (m *Manager) Stop() {
 	m.mu.Unlock()
 
 	m.stopOnce.Do(func() {
-		// Cancel context first so in-flight API calls abort
+		// Cancel the context first so in-flight API calls and downloads abort,
+		// then signal the monitor and workers to wind down.
 		m.cancel()
-		// Signal workers to stop via stopChan
 		close(m.stopChan)
-		// Close jobs channel to prevent new submissions
-		close(m.jobs)
-		// Drain any remaining jobs to prevent deadlock
-		go func() {
-			for range m.jobs {
-				// Drain jobs channel
-			}
-		}()
 	})
 
-	// Wait for all workers to finish
-	m.workerWg.Wait()
-	// Wait for monitor to finish
+	// Wait in dependency order. The monitor adds to processorWg and the
+	// processors add to workerWg, so draining in any other order would let an
+	// Add race a Wait.
 	m.monitorWg.Wait()
+	m.processorWg.Wait()
+	m.workerWg.Wait()
 }
 
-// QueueDownload adds a download job to the queue if not already downloading
+// QueueDownload adds a download job to the queue if not already downloading.
+//
+// This deliberately holds no lock across the channel send: the send blocks
+// once the queue is full, and blocking there while holding m.mu would
+// deadlock against Stop.
 func (m *Manager) QueueDownload(job downloadJob) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// Refuse new work once shutdown has begun. This is checked before claiming
+	// the file because the queue is buffered: after the workers exit, a send
+	// still succeeds, which would otherwise leave the file marked active with
+	// nothing left to run it.
+	select {
+	case <-m.stopChan:
+		return
+	default:
+	}
 
-	// A delayed retry can race with shutdown. Never send to the closed queue.
-	if !m.running {
+	// LoadOrStore makes "not already downloading" and claiming the file a
+	// single atomic step.
+	if _, alreadyActive := m.activeFiles.LoadOrStore(job.FileID, job.TransferID); alreadyActive {
 		return
 	}
 
-	// Check if file is already being downloaded
-	if _, exists := m.activeFiles.Load(job.FileID); exists {
-		return
-	}
-
-	// Mark file as being downloaded before queueing, storing TransferID
-	m.activeFiles.Store(job.FileID, job.TransferID)
 	select {
 	case m.jobs <- job:
 		// Successfully queued

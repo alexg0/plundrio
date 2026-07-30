@@ -200,16 +200,22 @@ func TestScheduleDownloadRetryCancelsDuringShutdown(t *testing.T) {
 	}
 }
 
-func TestQueueDownloadAfterStopDoesNotTouchClosedQueue(t *testing.T) {
-	manager := &Manager{
-		jobs:     make(chan downloadJob),
-		stopChan: make(chan struct{}),
-	}
-	close(manager.jobs)
+// A delayed retry can fire after Stop. It must not queue the job and must not
+// leave the file marked as active.
+//
+// This previously constructed a Manager around a pre-closed jobs channel to
+// pin a running-flag guard. The queue is no longer closed on shutdown (closing
+// it is what caused "send on closed channel"), so that state is unreachable in
+// production; the test now drives a real Start/Stop instead of manufacturing
+// it, while asserting the same invariant.
+func TestQueueDownloadAfterStopDoesNotQueue(t *testing.T) {
+	m := newManagerForTest(t, &fakeClient{})
+	m.Start()
+	m.Stop()
 
-	manager.QueueDownload(downloadJob{FileID: 11, TransferID: 22})
+	m.QueueDownload(downloadJob{FileID: 11, TransferID: 22})
 
-	if _, ok := manager.activeFiles.Load(int64(11)); ok {
+	if _, ok := m.activeFiles.Load(int64(11)); ok {
 		t.Fatal("did not expect stopped manager to track a queued file")
 	}
 }
