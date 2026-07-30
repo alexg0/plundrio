@@ -30,7 +30,7 @@ go build ./cmd/plundrio && ./plundrio run --help
 
 **CI** (`.github/workflows/build.yml`) runs `nix build` for all four targets (native, aarch64, docker, docker-aarch64) on every push/PR.
 
-**Important**: When Go dependencies change (`go.mod`/`go.sum`), the `vendorHash` in `flake.nix` (line 169) must be updated. Build the project with Nix; the error message will contain the correct hash.
+**Important**: Dependencies are pinned by `gomod2nix.toml`, not a `vendorHash`. When `go.mod`/`go.sum` change, regenerate it with `nix develop --command gomod2nix generate` and commit the result, or the Nix build will use stale dependencies.
 
 ## Architecture
 
