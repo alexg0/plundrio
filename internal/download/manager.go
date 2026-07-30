@@ -122,9 +122,7 @@ func New(cfg *config.Config, client PutioClient) *Manager {
 
 	// Initialize coordinator and processor
 	m.processor = newTransferProcessor(m)
-	m.coordinator = NewTransferCoordinator(func(transferID int64) {
-		m.processor.MarkTransferProcessed(transferID)
-	})
+	m.coordinator = NewTransferCoordinator()
 
 	// Register cleanup hooks
 	m.coordinator.RegisterCleanupHook(func(transferID int64) error {

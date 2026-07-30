@@ -9,9 +9,7 @@ import (
 )
 
 // newTestManager creates a minimal Manager with just enough fields
-// for the TransferCoordinator to work. The coordinator's onProcessed
-// callback calls processor.MarkTransferProcessed(), so we wire up
-// a real TransferProcessor with a minimal config.
+// for the TransferCoordinator to work.
 func newTestManager() *Manager {
 	cfg := &config.Config{
 		TargetDir:   "/tmp/plundrio-test",
@@ -27,9 +25,7 @@ func newTestManager() *Manager {
 		jobs:       make(chan downloadJob, 5),
 	}
 	m.processor = newTransferProcessor(m)
-	m.coordinator = NewTransferCoordinator(func(transferID int64) {
-		m.processor.MarkTransferProcessed(transferID)
-	})
+	m.coordinator = NewTransferCoordinator()
 	return m
 }
 
@@ -69,11 +65,6 @@ func TestCoordinatorHappyPath(t *testing.T) {
 	}
 	if ctx.GetState() != TransferLifecycleProcessed {
 		t.Fatalf("expected Processed state, got %s", ctx.GetState())
-	}
-
-	// Verify the processor recorded it
-	if _, ok := m.processor.processedTransfers.Load(int64(1)); !ok {
-		t.Fatal("expected transfer to be marked as processed in processor")
 	}
 }
 

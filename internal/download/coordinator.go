@@ -9,17 +9,14 @@ import (
 
 // TransferCoordinator manages the lifecycle of transfers and their associated downloads
 type TransferCoordinator struct {
-	transfers           sync.Map // map[int64]*TransferContext
-	onTransferProcessed func(int64)
-	cleanupHooks        []func(int64) error
+	transfers    sync.Map // map[int64]*TransferContext
+	cleanupHooks []func(int64) error
 }
 
 // NewTransferCoordinator creates a new transfer coordinator.
-// onProcessed is called when a transfer reaches the Processed state.
-func NewTransferCoordinator(onProcessed func(int64)) *TransferCoordinator {
+func NewTransferCoordinator() *TransferCoordinator {
 	return &TransferCoordinator{
-		onTransferProcessed: onProcessed,
-		cleanupHooks:        make([]func(int64) error, 0),
+		cleanupHooks: make([]func(int64) error, 0),
 	}
 }
 
@@ -251,11 +248,9 @@ func (tc *TransferCoordinator) CompleteTransfer(transferID int64) error {
 		}
 	}
 
-	// Mark the transfer as processed instead of removing it
+	// Mark the transfer as processed instead of removing it. The context stays
+	// tracked so *arr can keep querying it as 100% until torrent-remove.
 	ctx.state = TransferLifecycleProcessed
-
-	// Notify that the transfer has been processed
-	tc.onTransferProcessed(transferID)
 
 	log.Info("transfer").
 		Int64("id", transferID).
