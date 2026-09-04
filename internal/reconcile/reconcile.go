@@ -382,22 +382,27 @@ func activeLocalPaths(root string, transfers []*putio.Transfer, nodes []*localNo
 		return nil, err
 	}
 
-	active := make(map[string]struct{}, len(transfers))
+	active := make(map[string]struct{}, len(transfers)*2)
 	for _, transfer := range transfers {
 		category := categories[strconv.FormatInt(transfer.ID, 10)]
 		if category == "" {
 			category = categories[transfer.Hash]
 		}
-		rel := filepath.Join(category, transfer.Name)
-		clean, err := confinedRelativePath(root, rel)
-		if err != nil {
-			return nil, fmt.Errorf("unsafe local path for transfer %d: %w", transfer.ID, err)
+		paths := []string{transfer.Name}
+		if category != "" {
+			paths = append(paths, filepath.Join(category, transfer.Name))
 		}
-		active[clean] = struct{}{}
-		if info, err := os.Stat(filepath.Join(root, clean)); err == nil {
-			collectSameLocalFiles(nodes, info, active)
-		} else if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("resolve active local path for transfer %d: %w", transfer.ID, err)
+		for _, rel := range paths {
+			clean, err := confinedRelativePath(root, rel)
+			if err != nil {
+				return nil, fmt.Errorf("unsafe local path for transfer %d: %w", transfer.ID, err)
+			}
+			active[clean] = struct{}{}
+			if info, err := os.Stat(filepath.Join(root, clean)); err == nil {
+				collectSameLocalFiles(nodes, info, active)
+			} else if !os.IsNotExist(err) {
+				return nil, fmt.Errorf("resolve active local path for transfer %d: %w", transfer.ID, err)
+			}
 		}
 	}
 	return active, nil

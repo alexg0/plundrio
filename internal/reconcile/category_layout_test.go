@@ -59,6 +59,31 @@ func TestReconcileRecognizesTransferIDCategoriesAndNestedPutioFolders(t *testing
 	}
 }
 
+func TestReconcileProtectsBarePathWhenCategoryStateIsStale(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "Active.Show"))
+	mustWrite(t, filepath.Join(root, "Active.Show", "episode.mkv"), "active")
+	mustWrite(t, filepath.Join(root, stateFileName), `{"10":"tv"}`)
+
+	client := &fakeClient{
+		transfers: []*putio.Transfer{{
+			ID: 10, Name: "Active.Show", SaveParentID: 1,
+		}},
+		files: map[int64][]*putio.File{},
+	}
+
+	report, err := New(client, 1, root).Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := objectLabels(report.Active), []string{"local:Active.Show"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("active objects = %v, want %v", got, want)
+	}
+	if len(report.Unmanaged) != 0 {
+		t.Fatalf("bare active content reported unmanaged: %+v", report.Unmanaged)
+	}
+}
+
 func TestReconcileSamplesOwnershipAfterEnumeratingCandidates(t *testing.T) {
 	report, err := New(&activatesWhileListingClient{}, 1, t.TempDir()).Reconcile(context.Background())
 	if err != nil {

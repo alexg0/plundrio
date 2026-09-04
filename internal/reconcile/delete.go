@@ -59,7 +59,7 @@ func (r DeleteReport) HasFailures() bool {
 	return r.Summary.Skipped != 0 || r.Summary.Failed != 0
 }
 
-// Delete revalidates every report ID immediately before optionally deleting it.
+// Delete revalidates the batch once and refreshes after each successful mutation.
 func (s *Service) Delete(ctx context.Context, options DeleteOptions) (DeleteReport, error) {
 	ids, err := validateDeleteOptions(options)
 	if err != nil {
@@ -72,8 +72,9 @@ func (s *Service) Delete(ctx context.Context, options DeleteOptions) (DeleteRepo
 		Sources:       selectedSources(options),
 		Results:       make([]DeleteResult, 0, len(ids)),
 	}
-	for _, id := range ids {
-		result := s.deleteOne(ctx, id, options)
+	current, reconcileErr := s.Reconcile(ctx)
+	for index, id := range ids {
+		result := s.deleteOne(ctx, id, options, current, reconcileErr)
 		report.Results = append(report.Results, result)
 		report.Summary.SelectedCount++
 		report.Summary.SelectedBytes += result.Size
@@ -86,6 +87,9 @@ func (s *Service) Delete(ctx context.Context, options DeleteOptions) (DeleteRepo
 			report.Summary.Skipped++
 		case "failed":
 			report.Summary.Failed++
+		}
+		if result.Status == "deleted" && index < len(ids)-1 {
+			current, reconcileErr = s.Reconcile(ctx)
 		}
 	}
 	return report, nil
@@ -160,10 +164,9 @@ func selectedSources(options DeleteOptions) []string {
 	return sources
 }
 
-func (s *Service) deleteOne(ctx context.Context, id string, options DeleteOptions) DeleteResult {
-	current, err := s.Reconcile(ctx)
-	if err != nil {
-		return DeleteResult{ID: id, Source: sourceFromID(id), Status: "failed", Reason: "revalidation_failed", Error: err.Error()}
+func (s *Service) deleteOne(ctx context.Context, id string, options DeleteOptions, current Report, reconcileErr error) DeleteResult {
+	if reconcileErr != nil {
+		return DeleteResult{ID: id, Source: sourceFromID(id), Status: "failed", Reason: "revalidation_failed", Error: reconcileErr.Error()}
 	}
 	if object, ok := findObject(current.Active, id); ok {
 		return resultForObject(object, "skipped", "active_transfer", nil)

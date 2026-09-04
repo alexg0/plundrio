@@ -24,12 +24,12 @@ type fakeClient struct {
 }
 
 func (f *fakeClient) GetTransfers(context.Context) ([]*putio.Transfer, error) {
+	index := f.transferCalls
+	f.transferCalls++
 	if len(f.transferStates) != 0 {
-		index := f.transferCalls
 		if index >= len(f.transferStates) {
 			index = len(f.transferStates) - 1
 		}
-		f.transferCalls++
 		return f.transferStates[index], nil
 	}
 	return f.transfers, nil
@@ -169,6 +169,60 @@ func TestDeleteDefaultsToDryRun(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "local.bin")); err != nil {
 		t.Fatalf("dry run changed local object: %v", err)
+	}
+}
+
+func TestDeleteDryRunReconcilesBatchOnce(t *testing.T) {
+	client := &fakeClient{files: map[int64][]*putio.File{
+		1: {
+			putioFile(2, "first.bin", 1, false, 2),
+			putioFile(3, "second.bin", 1, false, 3),
+		},
+	}}
+
+	report, err := New(client, 1, t.TempDir()).Delete(context.Background(), DeleteOptions{
+		IDs: []string{"putio:2", "putio:3"}, Putio: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary.WouldDelete != 2 {
+		t.Fatalf("unexpected dry-run report: %+v", report)
+	}
+	if client.transferCalls != 1 {
+		t.Fatalf("GetTransfers calls = %d, want 1", client.transferCalls)
+	}
+}
+
+func TestDeleteApplyRefreshesAfterDeletion(t *testing.T) {
+	client := &fakeClient{
+		transferStates: [][]*putio.Transfer{
+			{},
+			{{ID: 7, FileID: 3, Name: "second.bin", SaveParentID: 1}},
+		},
+		files: map[int64][]*putio.File{1: {
+			putioFile(2, "first.bin", 1, false, 2),
+			putioFile(3, "second.bin", 1, false, 3),
+		}},
+	}
+
+	report, err := New(client, 1, t.TempDir()).Delete(context.Background(), DeleteOptions{
+		IDs: []string{"putio:2", "putio:3"}, Putio: true, Apply: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := report.Results[0]; got.Status != "deleted" {
+		t.Fatalf("first result = %+v", got)
+	}
+	if got := report.Results[1]; got.Status != "skipped" || got.Reason != "active_transfer" {
+		t.Fatalf("second result = %+v", got)
+	}
+	if !reflect.DeepEqual(client.deleted, []int64{2}) {
+		t.Fatalf("deleted objects = %v, want [2]", client.deleted)
+	}
+	if client.transferCalls != 2 {
+		t.Fatalf("GetTransfers calls = %d, want 2", client.transferCalls)
 	}
 }
 
