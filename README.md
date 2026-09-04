@@ -47,6 +47,7 @@ put.io essentially performs the same download process.
 - [🎮 Commands](#-commands)
   - [Run the download manager](#run-the-download-manager)
   - [Report unmanaged downloads](#report-unmanaged-downloads)
+  - [Delete selected unmanaged downloads](#delete-selected-unmanaged-downloads)
   - [Generate configuration file](#generate-configuration-file)
   - [Get OAuth token](#get-oauth-token)
 - [💡 Tips \& Optimization](#-tips--optimization)
@@ -334,11 +335,40 @@ plundrio reconcile report \
 
 The command emits stable JSON with separate `active` and `unmanaged` arrays.
 Put.io objects use IDs such as `putio:12345`; local objects use deterministic
-IDs derived from their root-relative paths. Nested roots are reduced to the
-smallest non-overlapping objects: active descendants and their unmanaged
-siblings are reported separately, while a wholly unmanaged directory is one
-object whose size includes its contents. The command never creates a missing
-Put.io folder and does not move, rename, download, or delete anything.
+IDs derived from their root-relative paths and current filesystem identity.
+Changing or replacing local content invalidates its prior ID. Nested roots are
+reduced to the smallest non-overlapping objects: active descendants and their
+unmanaged siblings are reported separately, while a wholly unmanaged directory
+is one object whose size includes its contents. The command never creates a
+missing Put.io folder and does not move, rename, download, or delete anything.
+
+### Delete selected unmanaged downloads
+
+Pass exact IDs from a current report and explicitly select the roots in scope.
+Deletion is a dry run unless `--apply` is also present:
+
+```bash
+plundrio reconcile delete \
+  --target /path/to/downloads \
+  --folder plundrio \
+  --putio \
+  --id putio:12345
+
+plundrio reconcile delete \
+  --target /path/to/downloads \
+  --folder plundrio \
+  --local \
+  --id local:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --apply
+```
+
+`--putio` and `--local` are independent and may be combined only when both
+roots are intended. Before every applied deletion, Plundrio rebuilds the
+reconciliation report and refuses an ID that is active, moved, missing, or no
+longer unmanaged. Local removal uses Go's root-confined filesystem API and
+rejects symlink objects. The JSON result records every selected object's path,
+size, status, reason, and error; skipped or failed objects make the command exit
+non-zero after the complete batch is reported.
 
 ### Generate configuration file
 

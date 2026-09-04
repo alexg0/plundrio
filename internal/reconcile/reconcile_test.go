@@ -3,9 +3,11 @@ package reconcile
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,16 +15,36 @@ import (
 )
 
 type fakeClient struct {
-	transfers []*putio.Transfer
-	files     map[int64][]*putio.File
+	transfers      []*putio.Transfer
+	transferStates [][]*putio.Transfer
+	transferCalls  int
+	files          map[int64][]*putio.File
+	deleteErrors   map[int64]error
+	deleted        []int64
 }
 
 func (f *fakeClient) GetTransfers(context.Context) ([]*putio.Transfer, error) {
+	if len(f.transferStates) != 0 {
+		index := f.transferCalls
+		if index >= len(f.transferStates) {
+			index = len(f.transferStates) - 1
+		}
+		f.transferCalls++
+		return f.transferStates[index], nil
+	}
 	return f.transfers, nil
 }
 
 func (f *fakeClient) GetFiles(_ context.Context, folderID int64) ([]*putio.File, error) {
 	return f.files[folderID], nil
+}
+
+func (f *fakeClient) DeleteFile(_ context.Context, fileID int64) error {
+	if err := f.deleteErrors[fileID]; err != nil {
+		return err
+	}
+	f.deleted = append(f.deleted, fileID)
+	return nil
 }
 
 func TestReconcileReportsOnlyUnownedObjectsAsUnmanaged(t *testing.T) {
@@ -125,6 +147,228 @@ func TestReconcileRejectsUnsafeActiveLocalPath(t *testing.T) {
 	}
 }
 
+func TestDeleteDefaultsToDryRun(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "local.bin"), "local")
+	client := &fakeClient{files: map[int64][]*putio.File{
+		1: {putioFile(2, "remote.bin", 1, false, 6)},
+	}}
+
+	service := New(client, 1, root)
+	report, err := service.Delete(context.Background(), DeleteOptions{
+		IDs: []string{unmanagedObjectID(t, service, "local", "local.bin"), "putio:2"}, Putio: true, Local: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Applied || report.Summary.WouldDelete != 2 || report.Summary.SelectedBytes != 11 {
+		t.Fatalf("unexpected dry-run report: %+v", report)
+	}
+	if len(client.deleted) != 0 {
+		t.Fatalf("dry run deleted Put.io objects: %v", client.deleted)
+	}
+	if _, err := os.Stat(filepath.Join(root, "local.bin")); err != nil {
+		t.Fatalf("dry run changed local object: %v", err)
+	}
+}
+
+func TestDeleteRequiresExplicitIDsAndSourceSelection(t *testing.T) {
+	service := New(&fakeClient{}, 1, t.TempDir())
+	tests := []DeleteOptions{
+		{IDs: []string{"putio:2"}},
+		{Putio: true},
+		{IDs: []string{"putio:2"}, Local: true},
+		{IDs: []string{"local:" + strings.Repeat("0", sha256HexLength)}, Putio: true},
+	}
+	for _, options := range tests {
+		if _, err := service.Delete(context.Background(), options); err == nil {
+			t.Fatalf("Delete(%+v) unexpectedly succeeded", options)
+		}
+	}
+}
+
+func TestDeleteRefusesObjectThatBecameActive(t *testing.T) {
+	root := t.TempDir()
+	client := &fakeClient{
+		transferStates: [][]*putio.Transfer{
+			{},
+			{{ID: 7, FileID: 2, Name: "remote.bin", SaveParentID: 1}},
+		},
+		files: map[int64][]*putio.File{1: {putioFile(2, "remote.bin", 1, false, 6)}},
+	}
+	service := New(client, 1, root)
+	original, err := service.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(original.Unmanaged) != 1 {
+		t.Fatalf("original report did not identify candidate: %+v", original)
+	}
+
+	report, err := service.Delete(context.Background(), DeleteOptions{IDs: []string{"putio:2"}, Putio: true, Apply: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := report.Results[0]; got.Status != "skipped" || got.Reason != "active_transfer" {
+		t.Fatalf("stale selection result = %+v", got)
+	}
+	if !report.HasFailures() || len(client.deleted) != 0 {
+		t.Fatalf("active object was not safely refused: report=%+v deleted=%v", report, client.deleted)
+	}
+}
+
+func TestDeleteRefusesChangedLocalSnapshot(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(t *testing.T, root string)
+		change func(t *testing.T, root string)
+		path   string
+	}{
+		{
+			name: "same-path replacement",
+			setup: func(t *testing.T, root string) {
+				mustWrite(t, filepath.Join(root, "leftover.bin"), "old")
+			},
+			change: func(t *testing.T, root string) {
+				if err := os.Remove(filepath.Join(root, "leftover.bin")); err != nil {
+					t.Fatal(err)
+				}
+				mustWrite(t, filepath.Join(root, "leftover.bin"), "new")
+			},
+			path: "leftover.bin",
+		},
+		{
+			name: "directory gained child",
+			setup: func(t *testing.T, root string) {
+				mustMkdir(t, filepath.Join(root, "leftover"))
+				mustWrite(t, filepath.Join(root, "leftover", "first.bin"), "first")
+			},
+			change: func(t *testing.T, root string) {
+				mustWrite(t, filepath.Join(root, "leftover", "added.bin"), "added")
+			},
+			path: "leftover",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			test.setup(t, root)
+			service := New(&fakeClient{files: map[int64][]*putio.File{}}, 1, root)
+			id := unmanagedObjectID(t, service, "local", test.path)
+			test.change(t, root)
+
+			report, err := service.Delete(context.Background(), DeleteOptions{
+				IDs: []string{id}, Local: true, Apply: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := report.Results[0]; got.Status != "skipped" || got.Reason != "not_unmanaged" {
+				t.Fatalf("changed object result = %+v", got)
+			}
+			if _, err := os.Lstat(filepath.Join(root, test.path)); err != nil {
+				t.Fatalf("changed object was removed: %v", err)
+			}
+		})
+	}
+}
+
+func TestDeleteKeepsPutioAndLocalSelectionsIndependent(t *testing.T) {
+	t.Run("remote only", func(t *testing.T) {
+		root := t.TempDir()
+		mustWrite(t, filepath.Join(root, "local.bin"), "local")
+		client := &fakeClient{files: map[int64][]*putio.File{1: {putioFile(2, "remote.bin", 1, false, 6)}}}
+
+		report, err := New(client, 1, root).Delete(context.Background(), DeleteOptions{
+			IDs: []string{"putio:2"}, Putio: true, Apply: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.Results[0].Status != "deleted" || !reflect.DeepEqual(client.deleted, []int64{2}) {
+			t.Fatalf("unexpected remote deletion: report=%+v deleted=%v", report, client.deleted)
+		}
+		if _, err := os.Stat(filepath.Join(root, "local.bin")); err != nil {
+			t.Fatalf("remote-only deletion changed local object: %v", err)
+		}
+	})
+
+	t.Run("local only", func(t *testing.T) {
+		root := t.TempDir()
+		mustWrite(t, filepath.Join(root, "local.bin"), "local")
+		client := &fakeClient{files: map[int64][]*putio.File{1: {putioFile(2, "remote.bin", 1, false, 6)}}}
+
+		service := New(client, 1, root)
+		report, err := service.Delete(context.Background(), DeleteOptions{
+			IDs: []string{unmanagedObjectID(t, service, "local", "local.bin")}, Local: true, Apply: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.Results[0].Status != "deleted" || len(client.deleted) != 0 {
+			t.Fatalf("unexpected local deletion: report=%+v deleted=%v", report, client.deleted)
+		}
+		if _, err := os.Stat(filepath.Join(root, "local.bin")); !os.IsNotExist(err) {
+			t.Fatalf("local object still exists: %v", err)
+		}
+	})
+}
+
+func TestDeleteReportsPartialFailureAndContinues(t *testing.T) {
+	root := t.TempDir()
+	client := &fakeClient{
+		files: map[int64][]*putio.File{1: {
+			putioFile(2, "first.bin", 1, false, 2),
+			putioFile(3, "second.bin", 1, false, 3),
+		}},
+		deleteErrors: map[int64]error{3: errors.New("remote refused deletion")},
+	}
+
+	report, err := New(client, 1, root).Delete(context.Background(), DeleteOptions{
+		IDs: []string{"putio:3", "putio:2"}, Putio: true, Apply: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary.Deleted != 1 || report.Summary.Failed != 1 || !report.HasFailures() {
+		t.Fatalf("unexpected partial-failure summary: %+v", report)
+	}
+	if got := report.Results[1]; got.ID != "putio:3" || got.Status != "failed" || got.Error != "remote refused deletion" {
+		t.Fatalf("failed result is not precise: %+v", got)
+	}
+	if !reflect.DeepEqual(client.deleted, []int64{2}) {
+		t.Fatalf("successful deletion not preserved: %v", client.deleted)
+	}
+}
+
+func TestDeleteRejectsTraversalAndSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	mustWrite(t, filepath.Join(outside, "keep"), "safe")
+
+	if err := deleteLocalObject(root, Object{Source: "local", Path: "../outside"}); err == nil {
+		t.Fatal("expected traversal path to be rejected")
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{files: map[int64][]*putio.File{}}
+	service := New(client, 1, root)
+	report, err := service.Delete(context.Background(), DeleteOptions{
+		IDs: []string{unmanagedObjectID(t, service, "local", "escape")}, Local: true, Apply: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := report.Results[0]; got.Status != "failed" || !strings.Contains(got.Error, "refusing symlink") {
+		t.Fatalf("symlink result = %+v", got)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "keep")); err != nil {
+		t.Fatalf("symlink escape changed outside file: %v", err)
+	}
+}
+
 func putioFile(id int64, name string, parentID int64, directory bool, size int64) *putio.File {
 	contentType := "application/octet-stream"
 	if directory {
@@ -156,4 +400,19 @@ func objectLabels(objects []Object) []string {
 		labels[i] = object.Source + ":" + object.Path
 	}
 	return labels
+}
+
+func unmanagedObjectID(t *testing.T, service *Service, source, objectPath string) string {
+	t.Helper()
+	report, err := service.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range report.Unmanaged {
+		if object.Source == source && object.Path == objectPath {
+			return object.ID
+		}
+	}
+	t.Fatalf("unmanaged object %s:%s not found in report", source, objectPath)
+	return ""
 }

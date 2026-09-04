@@ -39,12 +39,11 @@ func newReconcileCmd() *cobra.Command {
 				return err
 			}
 
-			client := api.NewClient(cfg.token)
-			folderID, err := resolveReconcileFolder(cmd.Context(), client, cfg.folder)
+			service, err := openReconcileService(cmd.Context(), cfg)
 			if err != nil {
 				return err
 			}
-			report, err := reconcile.New(client, folderID, cfg.target).Reconcile(cmd.Context())
+			report, err := service.Reconcile(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -52,7 +51,55 @@ func newReconcileCmd() *cobra.Command {
 		},
 	})
 
+	deleteCmd := &cobra.Command{
+		Use:   "delete",
+		Short: "Dry-run or apply deletion of explicitly selected unmanaged IDs",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := loadReconcileConfig(cmd)
+			if err != nil {
+				return err
+			}
+			service, err := openReconcileService(cmd.Context(), cfg)
+			if err != nil {
+				return err
+			}
+			ids, _ := cmd.Flags().GetStringArray("id")
+			putioSelected, _ := cmd.Flags().GetBool("putio")
+			localSelected, _ := cmd.Flags().GetBool("local")
+			apply, _ := cmd.Flags().GetBool("apply")
+			report, err := service.Delete(cmd.Context(), reconcile.DeleteOptions{
+				IDs: ids, Putio: putioSelected, Local: localSelected, Apply: apply,
+			})
+			if err != nil {
+				return err
+			}
+			return writeDeleteReport(cmd, report)
+		},
+	}
+	deleteCmd.Flags().StringArray("id", nil, "Report object ID to select (repeatable, required)")
+	deleteCmd.Flags().Bool("putio", false, "Select Put.io objects for deletion")
+	deleteCmd.Flags().Bool("local", false, "Select local objects for deletion")
+	deleteCmd.Flags().Bool("apply", false, "Apply deletion; omitted means dry-run")
+	cmd.AddCommand(deleteCmd)
+
 	return cmd
+}
+
+type partialDeleteError struct{}
+
+func (partialDeleteError) Error() string {
+	return "one or more selected objects were skipped or failed"
+}
+
+func writeDeleteReport(cmd *cobra.Command, report reconcile.DeleteReport) error {
+	if err := writeJSON(cmd, report); err != nil {
+		return err
+	}
+	if report.HasFailures() {
+		return partialDeleteError{}
+	}
+	return nil
 }
 
 type reconcileConfig struct {
@@ -108,6 +155,15 @@ func resolveReconcileFolder(ctx context.Context, client reconcileAPI, folderName
 		}
 	}
 	return 0, fmt.Errorf("Put.io folder %q does not exist", folderName)
+}
+
+func openReconcileService(ctx context.Context, cfg reconcileConfig) (*reconcile.Service, error) {
+	client := api.NewClient(cfg.token)
+	folderID, err := resolveReconcileFolder(ctx, client, cfg.folder)
+	if err != nil {
+		return nil, err
+	}
+	return reconcile.New(client, folderID, cfg.target), nil
 }
 
 func writeJSON(cmd *cobra.Command, value any) error {
