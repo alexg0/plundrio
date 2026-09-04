@@ -428,7 +428,7 @@ func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
 	// were a transfer file. This commonly occurs when Plundrio restarts after
 	// local completion but before the Transmission client removes the transfer.
 	if transfer.FileID == 0 {
-		p.restoreCleanedTransfer(transfer)
+		p.restoreCleanedTransfer(transfer, true)
 		return
 	}
 
@@ -537,10 +537,21 @@ func buildTransferFileManifest(transfer *putio.Transfer, files []*putio.File) ([
 	return manifest, nil
 }
 
-func (p *TransferProcessor) restoreCleanedTransfer(transfer *putio.Transfer) {
+func (p *TransferProcessor) restoreCleanedTransfer(transfer *putio.Transfer, allowLegacy bool) {
 	files, ok := p.manager.transferFiles.Get(transfer.ID)
 	if !ok {
-		p.failCleanedTransfer(transfer, errors.New("source file is gone and no authoritative file manifest exists"))
+		if !allowLegacy {
+			p.failCleanedTransfer(transfer, errors.New("source file is gone and no authoritative file manifest exists"))
+			return
+		}
+		// Transfers cleaned by older Plundrio versions have no manifest to
+		// restore. Preserve the pre-manifest restart behavior: do not invent a
+		// file list, but restore the transfer as processed so clients can retire
+		// the legacy record instead of seeing a permanent download failure.
+		if !p.initializeTransfer(transfer, 0) {
+			return
+		}
+		p.manager.cleanupTransfer(transfer.ID)
 		return
 	}
 
@@ -605,7 +616,7 @@ func (p *TransferProcessor) handleTransferError(transfer *putio.Transfer, err er
 
 		cleanedTransfer := *transfer
 		cleanedTransfer.FileID = 0
-		p.restoreCleanedTransfer(&cleanedTransfer)
+		p.restoreCleanedTransfer(&cleanedTransfer, false)
 		return
 	}
 
