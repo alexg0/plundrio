@@ -328,6 +328,7 @@ func init() {
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(getTokenCmd)
 	rootCmd.AddCommand(generateConfigCmd)
+	rootCmd.AddCommand(newReconcileCmd())
 }
 
 func main() {

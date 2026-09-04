@@ -46,6 +46,7 @@ put.io essentially performs the same download process.
 - [🔌 Configuring \*arr Applications](#-configuring-arr-applications)
 - [🎮 Commands](#-commands)
   - [Run the download manager](#run-the-download-manager)
+  - [Report unmanaged downloads](#report-unmanaged-downloads)
   - [Generate configuration file](#generate-configuration-file)
   - [Get OAuth token](#get-oauth-token)
 - [💡 Tips \& Optimization](#-tips--optimization)
@@ -319,6 +320,25 @@ plundrio run \
   --token YOUR_PUTIO_TOKEN \
   --workers 4
 ```
+
+### Report unmanaged downloads
+
+`reconcile report` performs a read-only comparison of the configured Put.io
+folder and local download root against current transfer records:
+
+```bash
+plundrio reconcile report \
+  --target /path/to/downloads \
+  --folder plundrio
+```
+
+The command emits stable JSON with separate `active` and `unmanaged` arrays.
+Put.io objects use IDs such as `putio:12345`; local objects use deterministic
+IDs derived from their root-relative paths. Nested roots are reduced to the
+smallest non-overlapping objects: active descendants and their unmanaged
+siblings are reported separately, while a wholly unmanaged directory is one
+object whose size includes its contents. The command never creates a missing
+Put.io folder and does not move, rename, download, or delete anything.
 
 ### Generate configuration file
 
