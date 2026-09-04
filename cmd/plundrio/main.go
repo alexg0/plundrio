@@ -20,7 +20,10 @@ import (
 	"github.com/spf13/viper"
 )
 
-const defaultStalledTransferTimeout = 6 * time.Hour
+const (
+	defaultStalledTransferTimeout = 6 * time.Hour
+	stalledTransferTimeoutKey     = "stalled-transfer-timeout"
+)
 
 var version = "dev"
 
@@ -74,7 +77,7 @@ var runCmd = &cobra.Command{
 		// PLDR_USE_CATEGORIES_* env vars, and config-file keys all resolve.
 		useCategoriesTarget := viper.GetBool("use-categories-target")
 		useCategoriesPutio := viper.GetBool("use-categories-putio")
-		stalledTransferTimeout := viper.GetDuration("stalled-transfer-timeout")
+		stalledTransferTimeout := configuredStalledTransferTimeout()
 		downloadStartWindow := config.DownloadStartWindowConfig{
 			Enabled: viper.GetBool("download_start_window.enabled"),
 			Start:   viper.GetString("download_start_window.start"),
@@ -328,12 +331,16 @@ func init() {
 	runCmd.Flags().IntP("workers", "w", 4, "Number of workers")
 	runCmd.Flags().Bool("use-categories-target", false, "Place local downloads into per-category subfolders of the target directory (based on the *arr download-dir)")
 	runCmd.Flags().Bool("use-categories-putio", false, "Create per-category subfolders under the Put.io folder and upload transfers into them")
-	runCmd.Flags().Duration("stalled-transfer-timeout", defaultStalledTransferTimeout, "Report downloading Put.io transfers with no byte progress after this duration (0 disables)")
+	runCmd.Flags().Duration(stalledTransferTimeoutKey, defaultStalledTransferTimeout, "Report downloading Put.io transfers with no byte progress after this duration (0 disables)")
 	runCmd.Flags().String("log-level", "", "Log level (trace,debug,info,warn,error,fatal,none,pretty)")
 
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(getTokenCmd)
 	rootCmd.AddCommand(generateConfigCmd)
+}
+
+func configuredStalledTransferTimeout() time.Duration {
+	return viper.GetDuration(stalledTransferTimeoutKey)
 }
 
 func main() {
