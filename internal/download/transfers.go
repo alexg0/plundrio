@@ -509,7 +509,7 @@ func (p *TransferProcessor) failInitializedTransfer(transferID int64, err error)
 
 func buildTransferFileManifest(transfer *putio.Transfer, files []*putio.File) ([]TransferFile, error) {
 	transferName := filepath.Clean(transfer.Name)
-	if !validRelativeTransferPath(transferName) {
+	if !validRelativeTransferPath(transferName) || IsReservedTransferName(transferName) {
 		return nil, fmt.Errorf("unsafe transfer name %q", transfer.Name)
 	}
 
@@ -561,7 +561,7 @@ func validRelativeTransferPath(path string) bool {
 func (p *TransferProcessor) validateLocalTransferFiles(transfer *putio.Transfer, files []TransferFile) error {
 	downloadDir := filepath.Join(p.targetDir, p.manager.localCategory(transfer.ID))
 	transferName := filepath.Clean(transfer.Name)
-	if !validRelativeTransferPath(transferName) {
+	if !validRelativeTransferPath(transferName) || IsReservedTransferName(transferName) {
 		return fmt.Errorf("unsafe transfer name %q", transfer.Name)
 	}
 

@@ -510,7 +510,9 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 				Msg("Failed to delete transfer files")
 		}
 
+		remoteDeleted := true
 		if err := s.client.DeleteTransfer(ctx, transfer.ID); err != nil {
+			remoteDeleted = false
 			log.Error("rpc").
 				Str("operation", "torrent-remove").
 				Str("id", id.String()).
@@ -545,9 +547,13 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 			}
 		}
 
-		// Drop all local tracking for this transfer now that *arr is done with it.
-		s.dlService.RemoveCategory(transfer.ID)
-		s.dlService.RemoveTransfer(transfer.ID)
+		// Preserve the category and durable manifest while the remote transfer
+		// still exists. They are required to reconstruct exact ownership after a
+		// restart, especially if source-file deletion already succeeded.
+		if remoteDeleted {
+			s.dlService.RemoveCategory(transfer.ID)
+			s.dlService.RemoveTransfer(transfer.ID)
+		}
 	}
 
 	return struct{}{}, nil
@@ -556,6 +562,9 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 // deleteLocalData removes downloaded files for a transfer from the target directory.
 // It validates that the resolved path is inside targetDir to prevent path traversal.
 func deleteLocalData(targetDir, transferName string) error {
+	if download.IsReservedTransferName(transferName) {
+		return fmt.Errorf("transfer name %q is reserved for Plundrio state", transferName)
+	}
 	localPath := filepath.Join(targetDir, transferName)
 	absLocal, err := filepath.Abs(localPath)
 	if err != nil {

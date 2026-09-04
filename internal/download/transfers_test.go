@@ -113,6 +113,10 @@ func TestBuildTransferFileManifestRejectsUnsafeOrCollidingPaths(t *testing.T) {
 	}); err == nil {
 		t.Fatal("expected colliding local file names to fail")
 	}
+	transfer.Name = transferFilesStateDirName
+	if _, err := buildTransferFileManifest(transfer, []*putio.File{{Name: "101.json", Size: 1}}); err == nil {
+		t.Fatal("expected reserved manifest directory name to fail")
+	}
 }
 
 func TestProcessTransferManifestFailureIsMarkedFailed(t *testing.T) {

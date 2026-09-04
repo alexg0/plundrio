@@ -3,6 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -170,6 +173,54 @@ func TestHandleTorrentRemoveNumericID(t *testing.T) {
 				t.Fatalf("deleted transfers = %v, local removals = %v", client.deleted, service.removedTransfers)
 			}
 		})
+	}
+}
+
+func TestHandleTorrentRemoveRetainsBookkeepingWhenRemoteDeletionFails(t *testing.T) {
+	transfer := &putio.Transfer{ID: 101, Name: "Book", FileID: 501}
+	client := &torrentAddClient{
+		transfers:         []*putio.Transfer{transfer},
+		deleteTransferErr: errors.New("remote deletion failed"),
+	}
+	service := &torrentAddDownloadService{
+		categories: map[int64]string{101: "books"},
+		files: map[int64][]download.TransferFile{
+			101: {{Name: "Book/book.m4b", Length: 10}},
+		},
+		transfers: []*putio.Transfer{transfer},
+	}
+	server := &Server{cfg: &config.Config{TargetDir: t.TempDir()}, client: client, dlService: service}
+
+	if _, err := server.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[101]}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(service.removedTransfers) != 0 {
+		t.Fatalf("removed local transfers = %v, want none", service.removedTransfers)
+	}
+	if got := service.categories[101]; got != "books" {
+		t.Fatalf("retained category = %q, want books", got)
+	}
+	if _, ok := service.files[101]; !ok {
+		t.Fatal("durable manifest was discarded after remote deletion failed")
+	}
+}
+
+func TestDeleteLocalDataRejectsManifestNamespace(t *testing.T) {
+	targetDir := t.TempDir()
+	manifestPath := filepath.Join(targetDir, ".plundrio-files", "101.json")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, []byte("manifest"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := deleteLocalData(targetDir, ".plundrio-files"); err == nil {
+		t.Fatal("expected reserved manifest namespace deletion to fail")
+	}
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Fatalf("manifest was not preserved: %v", err)
 	}
 }
 

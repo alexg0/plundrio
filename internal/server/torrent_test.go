@@ -14,15 +14,16 @@ import (
 )
 
 type torrentAddClient struct {
-	addTransfer    *putio.Transfer
-	uploadTransfer *putio.Transfer
-	transfers      []*putio.Transfer
-	addMagnet      string
-	uploadData     []byte
-	uploadFilename string
-	folderID       int64
-	deletedFiles   []int64
-	deleted        []int64
+	addTransfer       *putio.Transfer
+	uploadTransfer    *putio.Transfer
+	transfers         []*putio.Transfer
+	addMagnet         string
+	uploadData        []byte
+	uploadFilename    string
+	folderID          int64
+	deletedFiles      []int64
+	deleted           []int64
+	deleteTransferErr error
 }
 
 func (c *torrentAddClient) GetAccountInfo(context.Context) (*putio.AccountInfo, error) {
@@ -66,7 +67,7 @@ func (c *torrentAddClient) DeleteFile(_ context.Context, fileID int64) error {
 
 func (c *torrentAddClient) DeleteTransfer(_ context.Context, transferID int64) error {
 	c.deleted = append(c.deleted, transferID)
-	return nil
+	return c.deleteTransferErr
 }
 
 type torrentAddDownloadService struct {

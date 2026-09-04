@@ -6,11 +6,18 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/elsbrock/plundrio/internal/log"
 )
 
 const transferFilesStateDirName = ".plundrio-files"
+
+// IsReservedTransferName reports whether name would occupy Plundrio's
+// manifest directory in the download root.
+func IsReservedTransferName(name string) bool {
+	return strings.EqualFold(filepath.Clean(name), transferFilesStateDirName)
+}
 
 // TransferFile describes one local file belonging to a Put.io transfer. Name
 // is relative to the transfer's reported Transmission downloadDir.
