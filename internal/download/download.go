@@ -21,6 +21,8 @@ const (
 	baseDownloadRetryDelay = 30 * time.Second
 )
 
+var errDownloadStalled = errors.New("download stalled")
+
 // downloadWorker processes download jobs from the queue
 func (m *Manager) downloadWorker() {
 	for {
@@ -147,6 +149,9 @@ func isTransientError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, errDownloadStalled) {
+		return true
+	}
 
 	// Cancellation is deliberate, never transient.
 	var downloadErr *DownloadError
@@ -244,8 +249,8 @@ func (m *Manager) scheduleDownloadRetry(job downloadJob, err error) bool {
 // downloadFile downloads a file from Put.io to the target directory using grab
 func (m *Manager) downloadFile(state *DownloadState) error {
 	// Derive context from manager's lifecycle context
-	ctx, cancel := context.WithCancel(m.Context())
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(m.Context())
+	defer cancel(nil)
 
 	// Get download URL
 	url, err := m.client.GetDownloadURL(ctx, state.FileID)
@@ -320,6 +325,12 @@ func (m *Manager) downloadFile(state *DownloadState) error {
 		close(done)
 		<-monitorStopped
 	}
+	cancellationError := func(reason string) error {
+		if cause := context.Cause(ctx); errors.Is(cause, errDownloadStalled) {
+			return cause
+		}
+		return NewDownloadCancelledError(state.Name, reason)
+	}
 
 	// Wait for completion or cancellation
 	select {
@@ -328,7 +339,7 @@ func (m *Manager) downloadFile(state *DownloadState) error {
 		// Check for errors
 		if err := resp.Err(); err != nil {
 			if ctx.Err() != nil {
-				return NewDownloadCancelledError(state.Name, "download stopped")
+				return cancellationError("download stopped")
 			}
 			return fmt.Errorf("download failed: %w", err)
 		}
@@ -378,6 +389,6 @@ func (m *Manager) downloadFile(state *DownloadState) error {
 
 	case <-ctx.Done():
 		stopMonitor()
-		return NewDownloadCancelledError(state.Name, "context cancelled")
+		return cancellationError("context cancelled")
 	}
 }

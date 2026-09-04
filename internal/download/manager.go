@@ -32,6 +32,7 @@ type Manager struct {
 
 	coordinator           *TransferCoordinator // Coordinates transfer lifecycle
 	categories            *CategoryStore       // Maps transfer hash → category subfolder
+	transferFiles         *TransferFileStore   // Persists exact local files by transfer ID
 	activeFiles           sync.Map             // map[int64]int64 - tracks files being downloaded, FileID -> TransferID
 	downloadRetryAttempts sync.Map             // map[int64]int - bounded local retry rounds by FileID
 	downloadRetryDelay    func(int) (time.Duration, bool)
@@ -80,6 +81,11 @@ func (m *Manager) GetTransferContext(transferID int64) (*TransferContext, bool) 
 	return m.coordinator.GetTransferContext(transferID)
 }
 
+// GetTransferFiles returns the exact persisted file list for a transfer.
+func (m *Manager) GetTransferFiles(transferID int64) ([]TransferFile, bool) {
+	return m.transferFiles.Get(transferID)
+}
+
 // SetCategory stores a category for a put.io transfer ID.
 func (m *Manager) SetCategory(transferID int64, category string) {
 	m.categories.Set(transferID, category)
@@ -109,6 +115,12 @@ func (m *Manager) localCategory(transferID int64) string {
 // for the lifetime of the process.
 func (m *Manager) RemoveTransfer(transferID int64) {
 	m.processor.forget(transferID)
+	if err := m.transferFiles.Remove(transferID); err != nil {
+		log.Error("files").
+			Int64("transfer_id", transferID).
+			Err(err).
+			Msg("Failed to remove transfer file state")
+	}
 }
 
 // activeFileCount returns how many of a transfer's files are still downloading.
@@ -139,6 +151,7 @@ func New(cfg *config.Config, client PutioClient) *Manager {
 		client:             client,
 		dlConfig:           dlConfig,
 		categories:         newCategoryStore(cfg.TargetDir),
+		transferFiles:      newTransferFileStore(cfg.TargetDir),
 		stopChan:           make(chan struct{}),
 		jobs:               make(chan downloadJob, workerCount*dlConfig.BufferMultiple),
 		activeFiles:        sync.Map{},
@@ -154,6 +167,15 @@ func New(cfg *config.Config, client PutioClient) *Manager {
 		state, ok := m.coordinator.GetTransferContext(transferID)
 		if !ok {
 			return NewTransferNotFoundError(transferID)
+		}
+		// Put.io uses zero for the root folder. Completed transfer records can
+		// remain after their source file has been deleted, so never pass that
+		// sentinel to DeleteFile after a restart.
+		if state.FileID == 0 {
+			log.Debug("cleanup").
+				Int64("transfer_id", transferID).
+				Msg("Skipping source deletion: transfer has no associated file")
+			return nil
 		}
 
 		// Delete only the source file from Put.io, but keep the transfer

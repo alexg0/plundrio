@@ -16,10 +16,13 @@ import (
 type torrentAddClient struct {
 	addTransfer    *putio.Transfer
 	uploadTransfer *putio.Transfer
+	transfers      []*putio.Transfer
 	addMagnet      string
 	uploadData     []byte
 	uploadFilename string
 	folderID       int64
+	deletedFiles   []int64
+	deleted        []int64
 }
 
 func (c *torrentAddClient) GetAccountInfo(context.Context) (*putio.AccountInfo, error) {
@@ -27,7 +30,7 @@ func (c *torrentAddClient) GetAccountInfo(context.Context) (*putio.AccountInfo, 
 }
 
 func (c *torrentAddClient) GetTransfers(context.Context) ([]*putio.Transfer, error) {
-	return nil, nil
+	return c.transfers, nil
 }
 
 func (c *torrentAddClient) UploadFile(
@@ -56,25 +59,34 @@ func (c *torrentAddClient) EnsureFolderInParent(_ context.Context, _ string, par
 	return parentID, nil
 }
 
-func (c *torrentAddClient) DeleteFile(context.Context, int64) error {
+func (c *torrentAddClient) DeleteFile(_ context.Context, fileID int64) error {
+	c.deletedFiles = append(c.deletedFiles, fileID)
 	return nil
 }
 
-func (c *torrentAddClient) DeleteTransfer(context.Context, int64) error {
+func (c *torrentAddClient) DeleteTransfer(_ context.Context, transferID int64) error {
+	c.deleted = append(c.deleted, transferID)
 	return nil
 }
 
 type torrentAddDownloadService struct {
 	categories       map[int64]string
+	files            map[int64][]download.TransferFile
+	transfers        []*putio.Transfer
 	removedTransfers []int64
 }
 
 func (s *torrentAddDownloadService) GetTransfers() []*putio.Transfer {
-	return nil
+	return s.transfers
 }
 
 func (s *torrentAddDownloadService) GetTransferContext(int64) (*download.TransferContext, bool) {
 	return nil, false
+}
+
+func (s *torrentAddDownloadService) GetTransferFiles(transferID int64) ([]download.TransferFile, bool) {
+	files, ok := s.files[transferID]
+	return files, ok
 }
 
 func (s *torrentAddDownloadService) SetCategory(transferID int64, category string) {
@@ -94,6 +106,7 @@ func (s *torrentAddDownloadService) RemoveCategory(transferID int64) {
 
 func (s *torrentAddDownloadService) RemoveTransfer(transferID int64) {
 	s.removedTransfers = append(s.removedTransfers, transferID)
+	delete(s.files, transferID)
 }
 
 func TestHandleTorrentAddReturnsMagnetTrackingFields(t *testing.T) {

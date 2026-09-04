@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,18 +47,75 @@ func (s *Server) localCategory(transferID int64) string {
 	return s.dlService.GetCategory(transferID)
 }
 
-// findTransferByHash finds a transfer by its hash string
-func (s *Server) findTransferByHash(ctx context.Context, hash string) (*putio.Transfer, error) {
+// torrentID is a Transmission torrent selector. Transmission clients may use
+// either the numeric torrent ID or its hash string.
+type torrentID struct {
+	id      int64
+	hash    string
+	numeric bool
+}
+
+func (id *torrentID) UnmarshalJSON(data []byte) error {
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		return fmt.Errorf("empty torrent id")
+	}
+
+	if strings.HasPrefix(value, `"`) {
+		var text string
+		if err := json.Unmarshal(data, &text); err != nil {
+			return err
+		}
+		if text == "" {
+			return fmt.Errorf("empty torrent id")
+		}
+		id.hash = text
+		return nil
+	}
+
+	numericID, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fmt.Errorf("torrent id must be an integer or hash string: %w", err)
+	}
+	id.id = numericID
+	id.numeric = true
+	return nil
+}
+
+func (id torrentID) matches(transfer *putio.Transfer) bool {
+	if id.numeric {
+		return transfer.ID == id.id
+	}
+	return strings.EqualFold(transfer.Hash, id.hash)
+}
+
+func (id torrentID) String() string {
+	if id.numeric {
+		return strconv.FormatInt(id.id, 10)
+	}
+	return id.hash
+}
+
+type torrentIDs []torrentID
+
+func (ids torrentIDs) matches(transfer *putio.Transfer) bool {
+	return len(ids) == 0 || slices.ContainsFunc(ids, func(id torrentID) bool {
+		return id.matches(transfer)
+	})
+}
+
+// findTransfer resolves either a numeric Transmission ID or a torrent hash.
+func (s *Server) findTransfer(ctx context.Context, id torrentID) (*putio.Transfer, error) {
 	transfers, err := s.client.GetTransfers(ctx)
 	if err != nil {
 		return nil, err
 	}
 	for _, t := range transfers {
-		if t.Hash == hash {
+		if id.matches(t) {
 			return t, nil
 		}
 	}
-	return nil, fmt.Errorf("transfer not found with hash: %s", hash)
+	return nil, fmt.Errorf("transfer not found with id: %s", id.String())
 }
 
 // handleTorrentAdd processes torrent-add requests
@@ -228,8 +287,8 @@ func (s *Server) putioFolderForCategory(ctx context.Context, category string) (i
 // handleTorrentGet processes torrent-get requests
 func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (interface{}, error) {
 	var params struct {
-		IDs    []string `json:"ids"`
-		Fields []string `json:"fields"`
+		IDs    torrentIDs `json:"ids"`
+		Fields []string   `json:"fields"`
 	}
 
 	if err := json.Unmarshal(args, &params); err != nil {
@@ -259,17 +318,8 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 	torrents := make([]map[string]interface{}, 0, len(transfers))
 	for _, t := range transfers {
 		// Filter by IDs if specified
-		if len(params.IDs) > 0 {
-			found := false
-			for _, id := range params.IDs {
-				if id == t.Hash {
-					found = true
-					break
-				}
-			}
-			if !found {
-				continue
-			}
+		if !params.IDs.matches(t) {
+			continue
 		}
 
 		// Look up transfer context if available
@@ -335,6 +385,14 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 			"errorString": t.ErrorMessage,
 		}
 
+		if slices.Contains(params.Fields, "files") {
+			files, err := s.localTorrentFiles(t, percentDone >= 1)
+			if err != nil {
+				return nil, fmt.Errorf("list local files for transfer %d: %w", t.ID, err)
+			}
+			torrentInfo["files"] = files
+		}
+
 		torrents = append(torrents, torrentInfo)
 
 		// Log each torrent being added to the response
@@ -369,23 +427,66 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 	return result, nil
 }
 
+type transmissionFile struct {
+	BytesCompleted int64  `json:"bytesCompleted"`
+	Length         int64  `json:"length"`
+	Name           string `json:"name"`
+}
+
+// localTorrentFiles returns the transfer-ID-keyed manifest. Names are relative
+// to downloadDir, matching Transmission's files contract.
+func (s *Server) localTorrentFiles(transfer *putio.Transfer, complete bool) ([]transmissionFile, error) {
+	transferName := filepath.Clean(transfer.Name)
+	if transferName == "." || !filepath.IsLocal(transferName) {
+		return nil, fmt.Errorf("unsafe transfer path %q", transfer.Name)
+	}
+	manifest, ok := s.dlService.GetTransferFiles(transfer.ID)
+	if !ok {
+		// Put.io may be complete before the local processor has built its
+		// authoritative manifest. Keep the torrent in the RPC response without
+		// claiming ownership of any files yet.
+		return []transmissionFile{}, nil
+	}
+	files := make([]transmissionFile, 0, len(manifest))
+	for _, file := range manifest {
+		if file.Length < 0 {
+			return nil, fmt.Errorf("manifest file %q has negative length", file.Name)
+		}
+		name := filepath.Clean(filepath.FromSlash(file.Name))
+		rel, err := filepath.Rel(transferName, name)
+		if err != nil || rel == "." || !filepath.IsLocal(rel) {
+			return nil, fmt.Errorf("manifest file %q is outside transfer %q", file.Name, transfer.Name)
+		}
+		var bytesCompleted int64
+		if complete {
+			bytesCompleted = file.Length
+		}
+		files = append(files, transmissionFile{
+			BytesCompleted: bytesCompleted,
+			Length:         file.Length,
+			Name:           filepath.ToSlash(name),
+		})
+	}
+	return files, nil
+}
+
 // handleTorrentRemove processes torrent-remove requests
 func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) (interface{}, error) {
 	var params struct {
-		IDs             []string `json:"ids"`
-		DeleteLocalData bool     `json:"delete-local-data"`
+		IDs             torrentIDs `json:"ids"`
+		DeleteLocalData bool       `json:"delete-local-data"`
 	}
 
 	if err := json.Unmarshal(args, &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	for _, hash := range params.IDs {
-		transfer, err := s.findTransferByHash(ctx, hash)
+	for _, id := range params.IDs {
+		transfer, err := s.findTransfer(ctx, id)
 		if err != nil {
 			log.Error("rpc").
 				Str("operation", "torrent-remove").
-				Str("hash", hash).
+				Str("id", id.String()).
 				Err(err).
 				Msg("Failed to find transfer")
 			continue
@@ -397,13 +498,13 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 		if transfer.FileID == 0 {
 			log.Warn("rpc").
 				Str("operation", "torrent-remove").
-				Str("hash", hash).
+				Str("id", id.String()).
 				Int64("transfer_id", transfer.ID).
 				Msg("Skipping file deletion: transfer has no associated file")
 		} else if err := s.client.DeleteFile(ctx, transfer.FileID); err != nil {
 			log.Error("rpc").
 				Str("operation", "torrent-remove").
-				Str("hash", hash).
+				Str("id", id.String()).
 				Int64("transfer_id", transfer.ID).
 				Err(err).
 				Msg("Failed to delete transfer files")
@@ -412,20 +513,19 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 		if err := s.client.DeleteTransfer(ctx, transfer.ID); err != nil {
 			log.Error("rpc").
 				Str("operation", "torrent-remove").
-				Str("hash", hash).
+				Str("id", id.String()).
 				Int64("transfer_id", transfer.ID).
 				Err(err).
 				Msg("Failed to delete transfer")
 		} else {
 			log.Info("rpc").
 				Str("operation", "torrent-remove").
-				Str("hash", hash).
+				Str("id", id.String()).
 				Int64("transfer_id", transfer.ID).
 				Bool("delete_local_data", params.DeleteLocalData).
 				Msg("Transfer removed")
 		}
 
-		// Delete local files if requested (closes #23)
 		if params.DeleteLocalData {
 			category := s.localCategory(transfer.ID)
 			localTargetDir := filepath.Join(s.cfg.TargetDir, category)

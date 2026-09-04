@@ -2,6 +2,7 @@ package download
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -255,6 +256,13 @@ func TestStalledDownloadIsCancelled(t *testing.T) {
 	case err := <-done:
 		if err == nil {
 			t.Fatal("expected the stalled download to fail")
+		}
+		if !errors.Is(err, errDownloadStalled) {
+			t.Fatalf("stalled download error = %v, want errDownloadStalled", err)
+		}
+		var downloadErr *DownloadError
+		if errors.As(err, &downloadErr) && downloadErr.Type == "DownloadCancelled" {
+			t.Fatalf("stalled download was misclassified as shutdown cancellation: %v", err)
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("stalled download was never cancelled")

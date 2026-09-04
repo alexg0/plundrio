@@ -2,6 +2,7 @@ package download
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -422,6 +423,15 @@ func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
 		Int64("file_id", transfer.FileID).
 		Msg("Processing transfer")
 
+	// A zero file ID means Put.io has already removed the source. It also
+	// identifies Put.io's root folder, so it must never be queried as though it
+	// were a transfer file. This commonly occurs when Plundrio restarts after
+	// local completion but before the Transmission client removes the transfer.
+	if transfer.FileID == 0 {
+		p.restoreCleanedTransfer(transfer)
+		return
+	}
+
 	files, err := p.manager.client.GetAllTransferFiles(p.manager.Context(), transfer.FileID)
 	if err != nil {
 		p.handleTransferError(transfer, err)
@@ -444,8 +454,28 @@ func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
 		return
 	}
 
-	// Initialize transfer with total number of files
+	// Track before building or persisting the manifest so any validation or
+	// storage failure becomes an observable, bounded Failed transfer instead of
+	// being retried as unseen work on every poll.
 	if !p.initializeTransfer(transfer, len(files)) {
+		return
+	}
+
+	manifest, err := buildTransferFileManifest(transfer, files)
+	if err != nil {
+		log.Error("transfers").
+			Int64("transfer_id", transfer.ID).
+			Err(err).
+			Msg("Failed to build transfer file manifest")
+		p.failInitializedTransfer(transfer.ID, err)
+		return
+	}
+	if err := p.manager.transferFiles.Set(transfer.ID, manifest); err != nil {
+		log.Error("transfers").
+			Int64("transfer_id", transfer.ID).
+			Err(err).
+			Msg("Failed to persist transfer file manifest")
+		p.failInitializedTransfer(transfer.ID, err)
 		return
 	}
 
@@ -468,6 +498,103 @@ func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
 	}
 }
 
+func (p *TransferProcessor) failInitializedTransfer(transferID int64, err error) {
+	if failErr := p.manager.coordinator.FailTransfer(transferID, err); failErr != nil {
+		log.Error("transfers").
+			Int64("transfer_id", transferID).
+			Err(failErr).
+			Msg("Failed to mark transfer as failed")
+	}
+}
+
+func buildTransferFileManifest(transfer *putio.Transfer, files []*putio.File) ([]TransferFile, error) {
+	transferName := filepath.Clean(transfer.Name)
+	if !validRelativeTransferPath(transferName) {
+		return nil, fmt.Errorf("unsafe transfer name %q", transfer.Name)
+	}
+
+	manifest := make([]TransferFile, 0, len(files))
+	seen := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		if file == nil {
+			return nil, errors.New("transfer contains nil file metadata")
+		}
+		fileName := filepath.Clean(file.Name)
+		if !validRelativeTransferPath(fileName) {
+			return nil, fmt.Errorf("unsafe transfer file name %q", file.Name)
+		}
+		if file.Size < 0 {
+			return nil, fmt.Errorf("transfer file %q has negative size", file.Name)
+		}
+		name := filepath.Join(transferName, fileName)
+		name = filepath.ToSlash(name)
+		if _, ok := seen[name]; ok {
+			return nil, fmt.Errorf("multiple transfer files map to local path %q", name)
+		}
+		seen[name] = struct{}{}
+		manifest = append(manifest, TransferFile{Name: name, Length: file.Size})
+	}
+	return manifest, nil
+}
+
+func (p *TransferProcessor) restoreCleanedTransfer(transfer *putio.Transfer) {
+	files, ok := p.manager.transferFiles.Get(transfer.ID)
+	if !ok {
+		p.failCleanedTransfer(transfer, errors.New("source file is gone and no authoritative file manifest exists"))
+		return
+	}
+
+	if err := p.validateLocalTransferFiles(transfer, files); err != nil {
+		p.failCleanedTransfer(transfer, err)
+		return
+	}
+	if !p.initializeTransfer(transfer, 0) {
+		return
+	}
+	p.manager.cleanupTransfer(transfer.ID)
+}
+
+func validRelativeTransferPath(path string) bool {
+	return path != "." && filepath.IsLocal(path)
+}
+
+func (p *TransferProcessor) validateLocalTransferFiles(transfer *putio.Transfer, files []TransferFile) error {
+	downloadDir := filepath.Join(p.targetDir, p.manager.localCategory(transfer.ID))
+	transferName := filepath.Clean(transfer.Name)
+	if !validRelativeTransferPath(transferName) {
+		return fmt.Errorf("unsafe transfer name %q", transfer.Name)
+	}
+
+	for _, file := range files {
+		name := filepath.Clean(filepath.FromSlash(file.Name))
+		rel, err := filepath.Rel(transferName, name)
+		if err != nil || !validRelativeTransferPath(rel) {
+			return fmt.Errorf("manifest file %q escapes transfer directory", file.Name)
+		}
+		path := filepath.Join(downloadDir, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("stat manifest file %q: %w", file.Name, err)
+		}
+		if !info.Mode().IsRegular() || info.Size() != file.Length {
+			return fmt.Errorf("manifest file %q does not match expected length %d", file.Name, file.Length)
+		}
+	}
+	return nil
+}
+
+func (p *TransferProcessor) failCleanedTransfer(transfer *putio.Transfer, err error) {
+	if !p.initializeTransfer(transfer, 1) {
+		return
+	}
+	if failErr := p.manager.coordinator.FailTransfer(transfer.ID, err); failErr != nil {
+		log.Error("transfers").
+			Int64("transfer_id", transfer.ID).
+			Err(failErr).
+			Msg("Failed to mark cleaned transfer as failed")
+	}
+}
+
 // handleTransferError processes transfer errors appropriately
 func (p *TransferProcessor) handleTransferError(transfer *putio.Transfer, err error) {
 	if isPutioNotFound(err) {
@@ -476,9 +603,9 @@ func (p *TransferProcessor) handleTransferError(transfer *putio.Transfer, err er
 			Int64("id", transfer.ID).
 			Msg("Files no longer exist on Put.io, cleaning up")
 
-		// Initialize transfer context before cleanup
-		p.initializeTransfer(transfer, 0)
-		p.manager.cleanupTransfer(transfer.ID)
+		cleanedTransfer := *transfer
+		cleanedTransfer.FileID = 0
+		p.restoreCleanedTransfer(&cleanedTransfer)
 		return
 	}
 
