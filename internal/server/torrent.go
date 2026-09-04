@@ -15,6 +15,11 @@ import (
 	"github.com/elsbrock/plundrio/internal/log"
 )
 
+const (
+	trErrorNone  = 0
+	trErrorLocal = 3
+)
+
 // extractCategory returns the relative category path from downloadDir.
 // For example, if targetDir="/downloads" and downloadDir="/downloads/tv",
 // it returns "tv". Returns "" if downloadDir is empty, equals targetDir, or
@@ -291,6 +296,11 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 		leftUntilDone := prog.LeftUntilDone
 		eta := t.EstimatedTime
 		rateDownload := t.DownloadSpeed
+		errorCode := trErrorNone
+		errorString := t.ErrorMessage
+		if errorString != "" {
+			errorCode = trErrorLocal
+		}
 
 		// Override ETA and rate with local values when available
 		if !prog.LocalETA.IsZero() {
@@ -331,8 +341,8 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 				}
 				return 0
 			}(),
-			"error":       t.ErrorMessage != "",
-			"errorString": t.ErrorMessage,
+			"error":       errorCode,
+			"errorString": errorString,
 		}
 
 		torrents = append(torrents, torrentInfo)
