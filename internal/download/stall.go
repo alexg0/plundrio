@@ -10,7 +10,6 @@ import (
 type transferProgress struct {
 	downloaded   int64
 	lastProgress time.Time
-	stalled      bool
 }
 
 // stallTracker detects Put.io transfers whose downloaded byte count remains
@@ -33,7 +32,6 @@ func newStallTracker(timeout time.Duration, now func() time.Time) *stallTracker 
 
 func (s *stallTracker) Observe(transfers []*putio.Transfer) {
 	if s.timeout <= 0 {
-		clear(s.progress)
 		return
 	}
 
@@ -51,12 +49,6 @@ func (s *stallTracker) Observe(transfers []*putio.Transfer) {
 				downloaded:   transfer.Downloaded,
 				lastProgress: now,
 			}
-			continue
-		}
-
-		if now.Sub(progress.lastProgress) >= s.timeout {
-			progress.stalled = true
-			s.progress[transfer.ID] = progress
 		}
 	}
 
@@ -68,7 +60,7 @@ func (s *stallTracker) Observe(transfers []*putio.Transfer) {
 }
 
 func (s *stallTracker) Error(transferID int64) string {
-	if progress, exists := s.progress[transferID]; exists && progress.stalled {
+	if progress, exists := s.progress[transferID]; exists && s.now().Sub(progress.lastProgress) >= s.timeout {
 		return fmt.Sprintf(
 			"Put.io transfer stalled: no byte progress for %s; inspect the transfer in Put.io",
 			s.timeout,

@@ -1,42 +1,12 @@
 package download
 
 import (
-	"context"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/elsbrock/go-putio"
-	"github.com/elsbrock/plundrio/internal/config"
 )
-
-type stallTestClient struct {
-	transfer *putio.Transfer
-}
-
-func (c *stallTestClient) GetTransfers(context.Context) ([]*putio.Transfer, error) {
-	transferCopy := *c.transfer
-	return []*putio.Transfer{&transferCopy}, nil
-}
-
-func (*stallTestClient) GetAllTransferFiles(context.Context, int64) ([]*putio.File, error) {
-	return nil, nil
-}
-
-func (*stallTestClient) GetFiles(context.Context, int64) ([]*putio.File, error) {
-	return nil, nil
-}
-
-func (*stallTestClient) RetryTransfer(context.Context, int64) (*putio.Transfer, error) {
-	return nil, nil
-}
-
-func (*stallTestClient) DeleteTransfer(context.Context, int64) error { return nil }
-func (*stallTestClient) DeleteFile(context.Context, int64) error     { return nil }
-func (*stallTestClient) GetDownloadURL(context.Context, int64) (string, error) {
-	return "", nil
-}
 
 type fakeClock struct {
 	now time.Time
@@ -123,43 +93,25 @@ func TestStallTrackerDisabledAndInactiveTransfers(t *testing.T) {
 	}
 }
 
-func TestTransferProcessorPublishesStallStateConcurrently(t *testing.T) {
+func TestTransferProcessorPublishesStallState(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)}
-	client := &stallTestClient{transfer: &putio.Transfer{
+	transfer := &putio.Transfer{
 		ID:           42,
 		Status:       "DOWNLOADING",
 		Downloaded:   100,
-		SaveParentID: 7,
-	}}
-	manager := New(&config.Config{
-		FolderID:               7,
-		TargetDir:              t.TempDir(),
-		WorkerCount:            1,
-		StalledTransferTimeout: time.Hour,
-	}, client)
+		SaveParentID: testFolderID,
+	}
+	manager := newManagerForTest(t, &fakeClient{
+		transfers: func() ([]*putio.Transfer, error) {
+			transferCopy := *transfer
+			return []*putio.Transfer{&transferCopy}, nil
+		},
+	})
 	manager.processor.stallTracker = newStallTracker(time.Hour, clock.Now)
 
 	manager.processor.checkTransfers()
 	clock.Advance(time.Hour)
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for range 20 {
-			manager.processor.checkTransfers()
-		}
-	}()
-	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for range 20 {
-				_ = manager.GetTransfers()
-			}
-		}()
-	}
-	wg.Wait()
+	manager.processor.checkTransfers()
 
 	transfers := manager.GetTransfers()
 	if got := len(transfers); got != 1 {

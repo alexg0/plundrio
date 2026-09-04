@@ -67,10 +67,11 @@ func (c *torrentAddClient) DeleteTransfer(context.Context, int64) error {
 type torrentAddDownloadService struct {
 	categories       map[int64]string
 	removedTransfers []int64
+	transfers        []*putio.Transfer
 }
 
 func (s *torrentAddDownloadService) GetTransfers() []*putio.Transfer {
-	return nil
+	return s.transfers
 }
 
 func (s *torrentAddDownloadService) GetTransferContext(int64) (*download.TransferContext, bool) {

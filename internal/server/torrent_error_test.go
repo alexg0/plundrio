@@ -7,45 +7,24 @@ import (
 
 	"github.com/elsbrock/go-putio"
 	"github.com/elsbrock/plundrio/internal/config"
-	"github.com/elsbrock/plundrio/internal/download"
 )
-
-type torrentGetDownloadService struct {
-	transfers []*putio.Transfer
-}
-
-func (s *torrentGetDownloadService) GetTransfers() []*putio.Transfer {
-	return s.transfers
-}
-
-func (s *torrentGetDownloadService) GetTransferContext(int64) (*download.TransferContext, bool) {
-	return nil, false
-}
-
-func (s *torrentGetDownloadService) SetCategory(int64, string) {}
-func (s *torrentGetDownloadService) GetCategory(int64) string  { return "" }
-func (s *torrentGetDownloadService) RemoveCategory(int64)      {}
-func (s *torrentGetDownloadService) RemoveTransfer(int64)      {}
 
 func TestHandleTorrentGetUsesTransmissionErrorFields(t *testing.T) {
 	tests := []struct {
-		name          string
-		errorString   string
-		wantError     int
-		wantErrorText string
+		name        string
+		errorString string
+		wantError   int
 	}{
 		{name: "healthy", wantError: 0},
 		{
-			name:          "sustained zero progress",
-			errorString:   "Put.io transfer stalled: no byte progress for 6h0m0s; inspect the transfer in Put.io",
-			wantError:     3,
-			wantErrorText: "Put.io transfer stalled: no byte progress for 6h0m0s; inspect the transfer in Put.io",
+			name:        "sustained zero progress",
+			errorString: "Put.io transfer stalled: no byte progress for 6h0m0s; inspect the transfer in Put.io",
+			wantError:   3,
 		},
 		{
-			name:          "Put.io error",
-			errorString:   "source unavailable",
-			wantError:     3,
-			wantErrorText: "source unavailable",
+			name:        "Put.io error",
+			errorString: "source unavailable",
+			wantError:   3,
 		},
 	}
 
@@ -58,7 +37,7 @@ func TestHandleTorrentGetUsesTransmissionErrorFields(t *testing.T) {
 				Status:       "DOWNLOADING",
 				ErrorMessage: tt.errorString,
 			}
-			service := &torrentGetDownloadService{
+			service := &torrentAddDownloadService{
 				transfers: []*putio.Transfer{transfer},
 			}
 			srv := &Server{
@@ -77,8 +56,8 @@ func TestHandleTorrentGetUsesTransmissionErrorFields(t *testing.T) {
 			if got := torrents[0]["error"]; got != tt.wantError {
 				t.Errorf("error = %#v, want %d", got, tt.wantError)
 			}
-			if got := torrents[0]["errorString"]; got != tt.wantErrorText {
-				t.Errorf("errorString = %#v, want %q", got, tt.wantErrorText)
+			if got := torrents[0]["errorString"]; got != tt.errorString {
+				t.Errorf("errorString = %#v, want %q", got, tt.errorString)
 			}
 		})
 	}
