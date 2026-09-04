@@ -20,6 +20,8 @@ import (
 const (
 	transmissionLimitModeSingle    = 1
 	transmissionLimitModeUnlimited = 2
+	trErrorNone                    = 0
+	trErrorLocal                   = 3
 )
 
 // extractCategory returns the relative category path from downloadDir.
@@ -357,6 +359,12 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 			secondsSeeding = 1
 		}
 
+		errorCode := trErrorNone
+		errorString := t.ErrorMessage
+		if errorString != "" {
+			errorCode = trErrorLocal
+		}
+
 		// Override ETA and rate with local values when available
 		if !prog.LocalETA.IsZero() {
 			if secsUntil := int64(time.Until(prog.LocalETA).Seconds()); secsUntil > 0 {
@@ -401,8 +409,8 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 				}
 				return 0
 			}(),
-			"error":       t.ErrorMessage != "",
-			"errorString": t.ErrorMessage,
+			"error":       errorCode,
+			"errorString": errorString,
 		}
 
 		if slices.Contains(params.Fields, "files") {

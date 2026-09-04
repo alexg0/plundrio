@@ -240,12 +240,15 @@ listen: ":9091"                # Transmission RPC server address
 workers: 4                     # Number of download workers
 use-categories-target: false   # Put local downloads into per-category subfolders (e.g. <target>/tv)
 use-categories-putio: false    # Create per-category subfolders on put.io (e.g. <folder>/tv)
+stalled-transfer-timeout: 6h   # Report unchanged Put.io downloads after this duration (0 disables)
 download_start_window:         # Optional local download start window
   enabled: false
   start: "23:00"
   end: "05:00"
 log_level: "info"              # Log level (trace,debug,info,warn,error,fatal,panic,none,pretty)
 ```
+
+`stalled-transfer-timeout` tracks the downloaded byte count of each Put.io transfer while its status is `DOWNLOADING`. The conservative default is `6h`; set it to `0` to disable detection. A stalled transfer is only reported through Transmission's `error` and `errorString` fields—plundrio does not stop, retry, or delete it. Detection restarts with a fresh observation window whenever plundrio restarts.
 
 `download_start_window` only gates when plundrio may begin a new local download. It does not stop Put.io transfers from being created, and it does not interrupt downloads that are already in progress.
 
@@ -270,6 +273,7 @@ export PLDR_LISTEN=:9091
 export PLDR_WORKERS=4
 export PLDR_USE_CATEGORIES_TARGET=true
 export PLDR_USE_CATEGORIES_PUTIO=true
+export PLDR_STALLED_TRANSFER_TIMEOUT=6h
 export PLDR_DOWNLOAD_START_WINDOW_ENABLED=true
 export PLDR_DOWNLOAD_START_WINDOW_START=23:00
 export PLDR_DOWNLOAD_START_WINDOW_END=05:00

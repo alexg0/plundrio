@@ -76,7 +76,6 @@ func (c *torrentAddClient) DeleteTransfer(_ context.Context, transferID int64) e
 type torrentAddDownloadService struct {
 	categories       map[int64]string
 	files            map[int64][]download.TransferFile
-	transfers        []*putio.Transfer
 	removedTransfers []int64
 	transfers        []*putio.Transfer
 	contexts         map[int64]*download.TransferContext

@@ -29,6 +29,7 @@ type TransferProcessor struct {
 
 	retryAttempts     sync.Map // map[int64]int - retry attempts for errored put.io transfers
 	reprocessAttempts sync.Map // map[int64]int - local reprocess attempts for failed transfers
+	stallTracker      *stallTracker
 }
 
 // GetTransfers returns the transfers seen on the most recent poll of the
@@ -58,9 +59,10 @@ func (p *TransferProcessor) setTransfers(transfers []*putio.Transfer) {
 // newTransferProcessor creates a new transfer processor
 func newTransferProcessor(m *Manager) *TransferProcessor {
 	return &TransferProcessor{
-		manager:   m,
-		folderID:  m.cfg.FolderID,
-		targetDir: m.cfg.TargetDir,
+		manager:      m,
+		folderID:     m.cfg.FolderID,
+		targetDir:    m.cfg.TargetDir,
+		stallTracker: newStallTracker(m.cfg.StalledTransferTimeout, time.Now),
 	}
 }
 
@@ -123,6 +125,13 @@ func (p *TransferProcessor) checkTransfers() {
 		}
 		inFolder = append(inFolder, t)
 		byStatus[t.Status] = append(byStatus[t.Status], t)
+	}
+
+	p.stallTracker.Observe(inFolder)
+	for _, transfer := range inFolder {
+		if transfer.ErrorMessage == "" {
+			transfer.ErrorMessage = p.stallTracker.Error(transfer.ID)
+		}
 	}
 
 	// Publish for RPC handlers before doing any slow work.
