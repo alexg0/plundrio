@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -247,6 +250,162 @@ func assertTorrentAddedResponse(
 		decoded.TorrentAdded.HashString != wantHash ||
 		decoded.TorrentAdded.Name != wantName {
 		t.Fatalf("unexpected torrent-added response: %s", body)
+	}
+}
+
+type torrentGetTestDownloadService struct {
+	transfers []*putio.Transfer
+	contexts  map[int64]*download.TransferContext
+}
+
+func (s *torrentGetTestDownloadService) GetTransfers() []*putio.Transfer {
+	return s.transfers
+}
+
+func (s *torrentGetTestDownloadService) GetTransferContext(transferID int64) (*download.TransferContext, bool) {
+	ctx, ok := s.contexts[transferID]
+	return ctx, ok
+}
+
+func (s *torrentGetTestDownloadService) SetCategory(int64, string) {}
+
+func (s *torrentGetTestDownloadService) GetCategory(int64) string { return "" }
+
+func (s *torrentGetTestDownloadService) RemoveCategory(int64) {}
+
+func (s *torrentGetTestDownloadService) RemoveTransfer(int64) {}
+
+type torrentGetRPCResponse struct {
+	Result    string `json:"result"`
+	Arguments struct {
+		Torrents []torrentGetRPCTorrent `json:"torrents"`
+	} `json:"arguments"`
+}
+
+type torrentGetRPCTorrent struct {
+	HashString     string  `json:"hashString"`
+	Status         int     `json:"status"`
+	LeftUntilDone  int64   `json:"leftUntilDone"`
+	SeedRatioMode  int     `json:"seedRatioMode"`
+	SeedRatioLimit float64 `json:"seedRatioLimit"`
+	SeedIdleMode   int     `json:"seedIdleMode"`
+	SeedIdleLimit  int64   `json:"seedIdleLimit"`
+	SecondsSeeding int64   `json:"secondsSeeding"`
+}
+
+func arrHasReachedSeedLimit(torrent torrentGetRPCTorrent, globalLimitsEnabled bool) bool {
+	isStopped := torrent.Status == trStatusStopped
+	isSeeding := torrent.Status == trStatusSeed
+
+	// The test transfers have a zero upload ratio, and the hypothetical global
+	// ratio limit is also zero.
+	if torrent.SeedRatioMode == 1 && isStopped && torrent.SeedRatioLimit <= 0 {
+		return true
+	}
+	if torrent.SeedRatioMode == 0 && isStopped && globalLimitsEnabled {
+		return true
+	}
+	if torrent.SeedIdleMode == 1 && (isStopped || isSeeding) && torrent.SecondsSeeding > torrent.SeedIdleLimit*60 {
+		return true
+	}
+	return torrent.SeedIdleMode == 0 && isStopped && globalLimitsEnabled
+}
+
+func TestTorrentGetReportsCompletedTransfersAsRemovable(t *testing.T) {
+	completedCtx := download.NewTransferContext(1, 1, download.TransferLifecycleProcessed)
+	completedCtx.SetTotalSize(1000)
+	completedCtx.AddDownloadedBytes(1000)
+
+	copyingCtx := download.NewTransferContext(2, 1, download.TransferLifecycleDownloading)
+	copyingCtx.SetTotalSize(1000)
+	copyingCtx.AddDownloadedBytes(500)
+
+	downloadService := &torrentGetTestDownloadService{
+		transfers: []*putio.Transfer{
+			{ID: 1, Hash: "completed", Name: "completed.mkv", PercentDone: 100, Status: "COMPLETED", Size: 1000},
+			{ID: 2, Hash: "copying", Name: "copying.mkv", PercentDone: 100, Status: "COMPLETED", Size: 1000},
+			{ID: 3, Hash: "error", Name: "error.mkv", PercentDone: 30, Status: "ERROR", Size: 1000},
+		},
+		contexts: map[int64]*download.TransferContext{
+			1: completedCtx,
+			2: copyingCtx,
+		},
+	}
+
+	server := &Server{
+		cfg:       &config.Config{TargetDir: "/downloads"},
+		dlService: downloadService,
+	}
+	requestBody := []byte(`{"method":"torrent-get","arguments":{"fields":["hashString","status","leftUntilDone","secondsSeeding","seedRatioLimit","seedRatioMode","seedIdleLimit","seedIdleMode"]}}`)
+	request := httptest.NewRequest(http.MethodPost, "/transmission/rpc", bytes.NewReader(requestBody))
+	request.Header.Set("X-Transmission-Session-Id", "123")
+	responseRecorder := httptest.NewRecorder()
+
+	server.handleRPC(responseRecorder, request)
+
+	if responseRecorder.Code != http.StatusOK {
+		t.Fatalf("torrent-get status = %d, want %d", responseRecorder.Code, http.StatusOK)
+	}
+
+	var response torrentGetRPCResponse
+	if err := json.NewDecoder(responseRecorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode torrent-get response: %v", err)
+	}
+	if response.Result != "success" {
+		t.Fatalf("torrent-get result = %q, want success", response.Result)
+	}
+
+	torrentsByHash := make(map[string]torrentGetRPCTorrent, len(response.Arguments.Torrents))
+	for _, torrent := range response.Arguments.Torrents {
+		torrentsByHash[torrent.HashString] = torrent
+	}
+
+	expected := map[string]torrentGetRPCTorrent{
+		"completed": {
+			HashString:     "completed",
+			Status:         trStatusSeed,
+			LeftUntilDone:  0,
+			SeedRatioMode:  2,
+			SeedRatioLimit: 0,
+			SeedIdleMode:   1,
+			SeedIdleLimit:  0,
+			SecondsSeeding: 1,
+		},
+		"copying": {
+			HashString:     "copying",
+			Status:         trStatusDownload,
+			LeftUntilDone:  500,
+			SeedRatioMode:  2,
+			SeedRatioLimit: 0,
+			SeedIdleMode:   2,
+			SeedIdleLimit:  0,
+			SecondsSeeding: 0,
+		},
+		"error": {
+			HashString:     "error",
+			Status:         trStatusStopped,
+			LeftUntilDone:  700,
+			SeedRatioMode:  2,
+			SeedRatioLimit: 0,
+			SeedIdleMode:   2,
+			SeedIdleLimit:  0,
+			SecondsSeeding: 0,
+		},
+	}
+
+	for hash, want := range expected {
+		got, ok := torrentsByHash[hash]
+		if !ok {
+			t.Errorf("torrent %q missing from response", hash)
+			continue
+		}
+		if got != want {
+			t.Errorf("torrent %q = %+v, want %+v", hash, got, want)
+		}
+		wantRemovable := hash == "completed"
+		if removable := arrHasReachedSeedLimit(got, true); removable != wantRemovable {
+			t.Errorf("torrent %q Arr HasReachedSeedLimit = %t, want %t", hash, removable, wantRemovable)
+		}
 	}
 }
 

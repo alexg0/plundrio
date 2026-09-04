@@ -15,6 +15,11 @@ import (
 	"github.com/elsbrock/plundrio/internal/log"
 )
 
+const (
+	transmissionLimitModeSingle    = 1
+	transmissionLimitModeUnlimited = 2
+)
+
 // extractCategory returns the relative category path from downloadDir.
 // For example, if targetDir="/downloads" and downloadDir="/downloads/tv",
 // it returns "tv". Returns "" if downloadDir is empty, equals targetDir, or
@@ -291,6 +296,16 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 		leftUntilDone := prog.LeftUntilDone
 		eta := t.EstimatedTime
 		rateDownload := t.DownloadSpeed
+		seedIdleMode := transmissionLimitModeUnlimited
+		secondsSeeding := int64(0)
+
+		// Arr clients treat a seeding torrent as removable only after its
+		// per-torrent idle limit has been exceeded. Put.io owns seeding, so a
+		// locally completed transfer can report that limit as reached.
+		if status == trStatusSeed && leftUntilDone == 0 {
+			seedIdleMode = transmissionLimitModeSingle
+			secondsSeeding = 1
+		}
 
 		// Override ETA and rate with local values when available
 		if !prog.LocalETA.IsZero() {
@@ -325,6 +340,11 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 			"percentDone":    percentDone,
 			"rateDownload":   rateDownload,
 			"rateUpload":     t.UploadSpeed,
+			"secondsSeeding": secondsSeeding,
+			"seedRatioLimit": 0,
+			"seedRatioMode":  transmissionLimitModeUnlimited,
+			"seedIdleLimit":  0,
+			"seedIdleMode":   seedIdleMode,
 			"uploadRatio": func() float64 {
 				if t.Size > 0 {
 					return float64(t.Uploaded) / float64(t.Size)
