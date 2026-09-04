@@ -189,7 +189,7 @@ func (f *fakePutioClient) GetFiles(ctx context.Context, folderID int64) ([]*puti
 	return f.files, f.filesErr
 }
 
-func TestProcessTransferWithoutManifestDoesNotQueryPutioRoot(t *testing.T) {
+func TestProcessTransferRestoresLegacyCleanedTransferWithoutManifest(t *testing.T) {
 	client := &fakePutioClient{}
 	p := newTestProcessor(t, 100, false, client)
 	transfer := &putio.Transfer{ID: 101, Name: "already cleaned", FileID: 0}
@@ -200,8 +200,8 @@ func TestProcessTransferWithoutManifestDoesNotQueryPutioRoot(t *testing.T) {
 		t.Fatalf("GetAllTransferFiles called %d times, want 0 for Put.io root", client.getAllTransferFilesCalls)
 	}
 	ctx, ok := p.manager.coordinator.GetTransferContext(101)
-	if !ok || ctx.GetState() != TransferLifecycleFailed {
-		t.Fatalf("transfer was not marked failed: context=%v exists=%v", ctx, ok)
+	if !ok || ctx.GetState() != TransferLifecycleProcessed {
+		t.Fatalf("legacy transfer was not restored as processed: context=%v exists=%v", ctx, ok)
 	}
 }
 
