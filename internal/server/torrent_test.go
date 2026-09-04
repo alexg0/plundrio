@@ -70,14 +70,17 @@ func (c *torrentAddClient) DeleteTransfer(context.Context, int64) error {
 type torrentAddDownloadService struct {
 	categories       map[int64]string
 	removedTransfers []int64
+	transfers        []*putio.Transfer
+	contexts         map[int64]*download.TransferContext
 }
 
 func (s *torrentAddDownloadService) GetTransfers() []*putio.Transfer {
-	return nil
+	return s.transfers
 }
 
-func (s *torrentAddDownloadService) GetTransferContext(int64) (*download.TransferContext, bool) {
-	return nil, false
+func (s *torrentAddDownloadService) GetTransferContext(transferID int64) (*download.TransferContext, bool) {
+	ctx, ok := s.contexts[transferID]
+	return ctx, ok
 }
 
 func (s *torrentAddDownloadService) SetCategory(transferID int64, category string) {
@@ -253,28 +256,6 @@ func assertTorrentAddedResponse(
 	}
 }
 
-type torrentGetTestDownloadService struct {
-	transfers []*putio.Transfer
-	contexts  map[int64]*download.TransferContext
-}
-
-func (s *torrentGetTestDownloadService) GetTransfers() []*putio.Transfer {
-	return s.transfers
-}
-
-func (s *torrentGetTestDownloadService) GetTransferContext(transferID int64) (*download.TransferContext, bool) {
-	ctx, ok := s.contexts[transferID]
-	return ctx, ok
-}
-
-func (s *torrentGetTestDownloadService) SetCategory(int64, string) {}
-
-func (s *torrentGetTestDownloadService) GetCategory(int64) string { return "" }
-
-func (s *torrentGetTestDownloadService) RemoveCategory(int64) {}
-
-func (s *torrentGetTestDownloadService) RemoveTransfer(int64) {}
-
 type torrentGetRPCResponse struct {
 	Result    string `json:"result"`
 	Arguments struct {
@@ -293,24 +274,6 @@ type torrentGetRPCTorrent struct {
 	SecondsSeeding int64   `json:"secondsSeeding"`
 }
 
-func arrHasReachedSeedLimit(torrent torrentGetRPCTorrent, globalLimitsEnabled bool) bool {
-	isStopped := torrent.Status == trStatusStopped
-	isSeeding := torrent.Status == trStatusSeed
-
-	// The test transfers have a zero upload ratio, and the hypothetical global
-	// ratio limit is also zero.
-	if torrent.SeedRatioMode == 1 && isStopped && torrent.SeedRatioLimit <= 0 {
-		return true
-	}
-	if torrent.SeedRatioMode == 0 && isStopped && globalLimitsEnabled {
-		return true
-	}
-	if torrent.SeedIdleMode == 1 && (isStopped || isSeeding) && torrent.SecondsSeeding > torrent.SeedIdleLimit*60 {
-		return true
-	}
-	return torrent.SeedIdleMode == 0 && isStopped && globalLimitsEnabled
-}
-
 func TestTorrentGetReportsCompletedTransfersAsRemovable(t *testing.T) {
 	completedCtx := download.NewTransferContext(1, 1, download.TransferLifecycleProcessed)
 	completedCtx.SetTotalSize(1000)
@@ -320,7 +283,7 @@ func TestTorrentGetReportsCompletedTransfersAsRemovable(t *testing.T) {
 	copyingCtx.SetTotalSize(1000)
 	copyingCtx.AddDownloadedBytes(500)
 
-	downloadService := &torrentGetTestDownloadService{
+	downloadService := &torrentAddDownloadService{
 		transfers: []*putio.Transfer{
 			{ID: 1, Hash: "completed", Name: "completed.mkv", PercentDone: 100, Status: "COMPLETED", Size: 1000},
 			{ID: 2, Hash: "copying", Name: "copying.mkv", PercentDone: 100, Status: "COMPLETED", Size: 1000},
@@ -360,51 +323,32 @@ func TestTorrentGetReportsCompletedTransfersAsRemovable(t *testing.T) {
 		torrentsByHash[torrent.HashString] = torrent
 	}
 
-	expected := map[string]torrentGetRPCTorrent{
-		"completed": {
-			HashString:     "completed",
-			Status:         trStatusSeed,
-			LeftUntilDone:  0,
-			SeedRatioMode:  2,
-			SeedRatioLimit: 0,
-			SeedIdleMode:   1,
-			SeedIdleLimit:  0,
-			SecondsSeeding: 1,
-		},
-		"copying": {
-			HashString:     "copying",
-			Status:         trStatusDownload,
-			LeftUntilDone:  500,
-			SeedRatioMode:  2,
-			SeedRatioLimit: 0,
-			SeedIdleMode:   2,
-			SeedIdleLimit:  0,
-			SecondsSeeding: 0,
-		},
-		"error": {
-			HashString:     "error",
-			Status:         trStatusStopped,
-			LeftUntilDone:  700,
-			SeedRatioMode:  2,
-			SeedRatioLimit: 0,
-			SeedIdleMode:   2,
-			SeedIdleLimit:  0,
-			SecondsSeeding: 0,
-		},
+	tests := []struct {
+		hash           string
+		status         int
+		leftUntilDone  int64
+		seedIdleMode   int
+		secondsSeeding int64
+	}{
+		{hash: "completed", status: trStatusSeed, seedIdleMode: 1, secondsSeeding: 1},
+		{hash: "copying", status: trStatusDownload, leftUntilDone: 500, seedIdleMode: 2},
+		{hash: "error", status: trStatusStopped, leftUntilDone: 700, seedIdleMode: 2},
 	}
 
-	for hash, want := range expected {
-		got, ok := torrentsByHash[hash]
+	for _, tt := range tests {
+		got, ok := torrentsByHash[tt.hash]
 		if !ok {
-			t.Errorf("torrent %q missing from response", hash)
+			t.Errorf("torrent %q missing from response", tt.hash)
 			continue
 		}
-		if got != want {
-			t.Errorf("torrent %q = %+v, want %+v", hash, got, want)
-		}
-		wantRemovable := hash == "completed"
-		if removable := arrHasReachedSeedLimit(got, true); removable != wantRemovable {
-			t.Errorf("torrent %q Arr HasReachedSeedLimit = %t, want %t", hash, removable, wantRemovable)
+		if got.Status != tt.status ||
+			got.LeftUntilDone != tt.leftUntilDone ||
+			got.SeedRatioMode != 2 ||
+			got.SeedRatioLimit != 0 ||
+			got.SeedIdleMode != tt.seedIdleMode ||
+			got.SeedIdleLimit != 0 ||
+			got.SecondsSeeding != tt.secondsSeeding {
+			t.Errorf("torrent %q has unexpected RPC fields: %+v", tt.hash, got)
 		}
 	}
 }
