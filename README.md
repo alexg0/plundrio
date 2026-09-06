@@ -358,6 +358,10 @@ direct category folders only. Deeper transfers are outside the monitor's scope.
 Persisted categories protect both bare and category-local active paths, even
 when category state is stale. The root's `.plundrio-state.json` and
 `.plundrio-files/` are reserved internal state and are never cleanup candidates.
+Pending-removal manifests also protect their local transfer directories even
+when the remote record moved outside managed folders or disappeared while a
+worker drains. If a pending removal has missing or malformed ownership evidence,
+reconciliation fails closed; resolve that removal before selecting cleanup IDs.
 An unmanaged object has no matching current transfer; that alone does not prove
 it was imported or is disposable. Review the report and verify retained copies
 before selecting IDs.

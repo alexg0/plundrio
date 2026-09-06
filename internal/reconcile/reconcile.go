@@ -372,6 +372,13 @@ func activeLocalPaths(root string, transfers []*putio.Transfer, nodes []*localNo
 	}
 
 	active := make(map[string]struct{}, len(transfers)*2)
+	pending, err := download.PendingRemovalPaths(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, rel := range pending {
+		active[rel] = struct{}{}
+	}
 	for _, transfer := range transfers {
 		category := categories[transfer.ID]
 		paths := []string{transfer.Name}
@@ -404,7 +411,7 @@ func collectSameLocalFiles(nodes []*localNode, target os.FileInfo, active map[st
 }
 
 func reservedLocalName(name string) bool {
-	return strings.EqualFold(name, download.CategoryStateFileName) || strings.EqualFold(name, ".plundrio-files")
+	return strings.EqualFold(name, download.CategoryStateFileName) || download.IsReservedTransferName(name)
 }
 
 func includesBranch(selected *Object, source, objectPath string) bool {
