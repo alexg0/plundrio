@@ -4,23 +4,21 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/elsbrock/go-putio"
+	"github.com/elsbrock/plundrio/internal/download"
 )
 
 const (
 	SchemaVersion = 1
-	stateFileName = ".plundrio-state.json"
 )
 
 // Client is the read-only Put.io surface needed to reconcile download roots.
@@ -66,28 +64,37 @@ type Report struct {
 
 // Service compares Put.io and local download-root objects with current transfers.
 type Service struct {
-	client        Client
-	putioFolderID int64
-	localRoot     string
+	client             Client
+	putioFolderID      int64
+	localRoot          string
+	useCategoriesPutio bool
 }
 
 // New creates a read-only reconciliation service.
-func New(client Client, putioFolderID int64, localRoot string) *Service {
-	return &Service{client: client, putioFolderID: putioFolderID, localRoot: localRoot}
+func New(client Client, putioFolderID int64, localRoot string, useCategoriesPutio bool) *Service {
+	return &Service{client: client, putioFolderID: putioFolderID, localRoot: localRoot, useCategoriesPutio: useCategoriesPutio}
 }
 
 // Reconcile returns active and unmanaged objects without mutating either root.
 func (s *Service) Reconcile(ctx context.Context) (Report, error) {
+	return s.snapshot(ctx, nil)
+}
+
+// A scoped snapshot refreshes only a selected object's branch. The root-level
+// Put.io listing still discovers managed category folders; unrelated subtrees
+// and the other source's payloads are never walked. Only the selected ID may be
+// used from this partial report.
+func (s *Service) snapshot(ctx context.Context, selected *Object) (Report, error) {
 	localRoot, err := filepath.Abs(s.localRoot)
 	if err != nil {
 		return Report{}, fmt.Errorf("resolve local root: %w", err)
 	}
 
-	remoteTree, err := s.remoteTree(ctx)
+	remoteTree, err := s.remoteTree(ctx, selected)
 	if err != nil {
 		return Report{}, err
 	}
-	localTree, err := buildLocalTree(localRoot)
+	localTree, err := buildLocalTree(localRoot, selected)
 	if err != nil {
 		return Report{}, err
 	}
@@ -95,7 +102,7 @@ func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 	if err != nil {
 		return Report{}, fmt.Errorf("list transfers: %w", err)
 	}
-	transfers = transfersInRoot(transfers, s.putioFolderID, remoteTree)
+	transfers = transfersInRoot(transfers, s.putioFolderID, remoteTree, s.useCategoriesPutio)
 
 	remoteActive := make(map[int64]struct{}, len(transfers))
 	remoteActiveParents := make(map[int64]struct{}, len(transfers))
@@ -151,12 +158,12 @@ type remoteNode struct {
 	children []*remoteNode
 }
 
-func (s *Service) remoteTree(ctx context.Context) ([]*remoteNode, error) {
+func (s *Service) remoteTree(ctx context.Context, selected *Object) ([]*remoteNode, error) {
 	visited := map[int64]struct{}{s.putioFolderID: {}}
-	return s.remoteChildren(ctx, s.putioFolderID, "", visited)
+	return s.remoteChildren(ctx, s.putioFolderID, "", visited, selected)
 }
 
-func (s *Service) remoteChildren(ctx context.Context, parentID int64, parentPath string, visited map[int64]struct{}) ([]*remoteNode, error) {
+func (s *Service) remoteChildren(ctx context.Context, parentID int64, parentPath string, visited map[int64]struct{}, selected *Object) ([]*remoteNode, error) {
 	files, err := s.client.GetFiles(ctx, parentID)
 	if err != nil {
 		return nil, fmt.Errorf("list Put.io folder %d: %w", parentID, err)
@@ -190,8 +197,8 @@ func (s *Service) remoteChildren(ctx context.Context, parentID int64, parentPath
 				ModifiedAt: remoteModifiedAt(file),
 			},
 		}
-		if file.IsDir() {
-			node.children, err = s.remoteChildren(ctx, file.ID, remotePath, visited)
+		if file.IsDir() && includesBranch(selected, "putio", remotePath) {
+			node.children, err = s.remoteChildren(ctx, file.ID, remotePath, visited, selected)
 			if err != nil {
 				return nil, err
 			}
@@ -265,7 +272,10 @@ type localNode struct {
 	children []*localNode
 }
 
-func buildLocalTree(root string) ([]*localNode, error) {
+func buildLocalTree(root string, selected *Object) ([]*localNode, error) {
+	if selected != nil && selected.Source != "local" {
+		return nil, nil
+	}
 	info, err := os.Stat(root)
 	if err != nil {
 		return nil, fmt.Errorf("stat local root: %w", err)
@@ -273,10 +283,10 @@ func buildLocalTree(root string) ([]*localNode, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("local root %q is not a directory", root)
 	}
-	return localChildren(root, "")
+	return localChildren(root, "", selected)
 }
 
-func localChildren(root, parentRel string) ([]*localNode, error) {
+func localChildren(root, parentRel string, selected *Object) ([]*localNode, error) {
 	directory := filepath.Join(root, parentRel)
 	entries, err := os.ReadDir(directory)
 	if err != nil {
@@ -286,7 +296,10 @@ func localChildren(root, parentRel string) ([]*localNode, error) {
 	nodes := make([]*localNode, 0, len(entries))
 	for _, entry := range entries {
 		rel := filepath.Join(parentRel, entry.Name())
-		if parentRel == "" && entry.Name() == stateFileName {
+		if !includesBranch(selected, "local", filepath.ToSlash(rel)) {
+			continue
+		}
+		if parentRel == "" && reservedLocalName(entry.Name()) {
 			continue
 		}
 		info, err := os.Lstat(filepath.Join(root, rel))
@@ -306,7 +319,7 @@ func localChildren(root, parentRel string) ([]*localNode, error) {
 			},
 		}
 		if info.IsDir() {
-			node.children, err = localChildren(root, rel)
+			node.children, err = localChildren(root, rel, selected)
 			if err != nil {
 				return nil, err
 			}
@@ -344,30 +357,6 @@ func localID(rel string, info os.FileInfo, children []*localNode) string {
 	return "local:" + hex.EncodeToString(sum[:])
 }
 
-func systemIdentity(info os.FileInfo) string {
-	value := reflect.ValueOf(info.Sys())
-	if !value.IsValid() {
-		return ""
-	}
-	if value.Kind() == reflect.Pointer {
-		if value.IsNil() {
-			return ""
-		}
-		value = value.Elem()
-	}
-	if value.Kind() != reflect.Struct {
-		return ""
-	}
-	parts := make([]string, 0, 3)
-	for _, name := range []string{"Dev", "Ino", "Ctim", "Ctimespec"} {
-		field := value.FieldByName(name)
-		if field.IsValid() && field.CanInterface() {
-			parts = append(parts, fmt.Sprint(field.Interface()))
-		}
-	}
-	return strings.Join(parts, ":")
-}
-
 func totalLocalBytes(nodes []*localNode) int64 {
 	var total int64
 	for _, node := range nodes {
@@ -377,17 +366,14 @@ func totalLocalBytes(nodes []*localNode) int64 {
 }
 
 func activeLocalPaths(root string, transfers []*putio.Transfer, nodes []*localNode) (map[string]struct{}, error) {
-	categories, err := loadCategories(root)
+	categories, err := download.LoadCategories(root)
 	if err != nil {
 		return nil, err
 	}
 
 	active := make(map[string]struct{}, len(transfers)*2)
 	for _, transfer := range transfers {
-		category := categories[strconv.FormatInt(transfer.ID, 10)]
-		if category == "" {
-			category = categories[transfer.Hash]
-		}
+		category := categories[transfer.ID]
 		paths := []string{transfer.Name}
 		if category != "" {
 			paths = append(paths, filepath.Join(category, transfer.Name))
@@ -417,19 +403,13 @@ func collectSameLocalFiles(nodes []*localNode, target os.FileInfo, active map[st
 	}
 }
 
-func loadCategories(root string) (map[string]string, error) {
-	data, err := os.ReadFile(filepath.Join(root, stateFileName))
-	if os.IsNotExist(err) {
-		return map[string]string{}, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read category state: %w", err)
-	}
-	categories := make(map[string]string)
-	if err := json.Unmarshal(data, &categories); err != nil {
-		return nil, fmt.Errorf("parse category state: %w", err)
-	}
-	return categories, nil
+func reservedLocalName(name string) bool {
+	return strings.EqualFold(name, download.CategoryStateFileName) || strings.EqualFold(name, ".plundrio-files")
+}
+
+func includesBranch(selected *Object, source, objectPath string) bool {
+	return selected == nil || selected.Source == source && (selected.Path == objectPath ||
+		strings.HasPrefix(selected.Path, objectPath+"/") || strings.HasPrefix(objectPath, selected.Path+"/"))
 }
 
 func confinedRelativePath(root, rel string) (string, error) {
@@ -478,37 +458,24 @@ func localTreeContainsActive(rel string, activePaths map[string]struct{}) bool {
 	return false
 }
 
-func transfersInRoot(transfers []*putio.Transfer, folderID int64, nodes []*remoteNode) []*putio.Transfer {
+func transfersInRoot(transfers []*putio.Transfer, folderID int64, nodes []*remoteNode, useCategoriesPutio bool) []*putio.Transfer {
 	managedFolders := map[int64]struct{}{folderID: {}}
-	collectRemoteFolderIDs(nodes, managedFolders)
-	managedObjects := make(map[int64]struct{})
-	collectRemoteObjectIDs(nodes, managedObjects)
+	if useCategoriesPutio {
+		for _, node := range nodes {
+			if node.object.Kind == "directory" {
+				managedFolders[node.fileID] = struct{}{}
+			}
+		}
+	}
 	result := make([]*putio.Transfer, 0, len(transfers))
 	for _, transfer := range transfers {
 		_, parentInRoot := managedFolders[transfer.SaveParentID]
-		_, objectInRoot := managedObjects[transfer.FileID]
-		if parentInRoot || objectInRoot {
+		if parentInRoot {
 			result = append(result, transfer)
 		}
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result
-}
-
-func collectRemoteObjectIDs(nodes []*remoteNode, ids map[int64]struct{}) {
-	for _, node := range nodes {
-		ids[node.fileID] = struct{}{}
-		collectRemoteObjectIDs(node.children, ids)
-	}
-}
-
-func collectRemoteFolderIDs(nodes []*remoteNode, ids map[int64]struct{}) {
-	for _, node := range nodes {
-		if node.object.Kind == "directory" {
-			ids[node.fileID] = struct{}{}
-			collectRemoteFolderIDs(node.children, ids)
-		}
-	}
 }
 
 func sortObjects(objects []Object) {

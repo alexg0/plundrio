@@ -3,7 +3,9 @@ package reconcile
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,7 +61,8 @@ func (r DeleteReport) HasFailures() bool {
 	return r.Summary.Skipped != 0 || r.Summary.Failed != 0
 }
 
-// Delete revalidates the batch once and refreshes after each successful mutation.
+// Delete inventories once, then revalidates each selected branch and current
+// transfer ownership before applying it. No mutation triggers a full root crawl.
 func (s *Service) Delete(ctx context.Context, options DeleteOptions) (DeleteReport, error) {
 	ids, err := validateDeleteOptions(options)
 	if err != nil {
@@ -73,8 +76,17 @@ func (s *Service) Delete(ctx context.Context, options DeleteOptions) (DeleteRepo
 		Results:       make([]DeleteResult, 0, len(ids)),
 	}
 	current, reconcileErr := s.Reconcile(ctx)
-	for index, id := range ids {
-		result := s.deleteOne(ctx, id, options, current, reconcileErr)
+	for _, id := range ids {
+		validated, validationErr := current, reconcileErr
+		if options.Apply && reconcileErr == nil {
+			if object, ok := findObject(current.Unmanaged, id); ok {
+				validated, validationErr = s.snapshot(ctx, &object)
+				if refreshed, found := findObject(validated.Unmanaged, id); found && refreshed.Path != object.Path {
+					validationErr = fmt.Errorf("selected object moved from %q to %q", object.Path, refreshed.Path)
+				}
+			}
+		}
+		result := s.deleteOne(ctx, id, options, validated, validationErr)
 		report.Results = append(report.Results, result)
 		report.Summary.SelectedCount++
 		report.Summary.SelectedBytes += result.Size
@@ -87,9 +99,6 @@ func (s *Service) Delete(ctx context.Context, options DeleteOptions) (DeleteRepo
 			report.Summary.Skipped++
 		case "failed":
 			report.Summary.Failed++
-		}
-		if result.Status == "deleted" && index < len(ids)-1 {
-			current, reconcileErr = s.Reconcile(ctx)
 		}
 	}
 	return report, nil
@@ -238,6 +247,9 @@ func deleteLocalObject(rootPath string, object Object) error {
 	if err != nil {
 		return err
 	}
+	if reservedLocalName(strings.Split(filepath.ToSlash(rel), "/")[0]) {
+		return fmt.Errorf("refusing reserved local state %q", object.Path)
+	}
 	root, err := os.OpenRoot(rootPath)
 	if err != nil {
 		return fmt.Errorf("open local root: %w", err)
@@ -251,8 +263,55 @@ func deleteLocalObject(rootPath string, object Object) error {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("refusing symlink %q", object.Path)
 	}
+	// Refuse every symlink ancestor, including links within the root. OpenRoot
+	// also confines resolution if a parent is replaced concurrently.
+	for parent := filepath.Dir(rel); parent != "."; parent = filepath.Dir(parent) {
+		parentInfo, err := root.Lstat(parent)
+		if err != nil {
+			return err
+		}
+		if parentInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing symlink parent %q", parent)
+		}
+	}
+	current, err := confinedLocalNode(root.FS(), filepath.ToSlash(rel))
+	if err != nil {
+		return fmt.Errorf("revalidate local identity: %w", err)
+	}
+	if current.object.ID != object.ID {
+		return fmt.Errorf("local object changed since selection")
+	}
 	if err := root.RemoveAll(rel); err != nil {
 		return fmt.Errorf("remove local object: %w", err)
 	}
 	return nil
+}
+
+// Recompute the selected tree through the opened root immediately before
+// removal. Missing platform identity is an explicit mutation refusal, never a
+// weaker path/size/mtime-only delete decision.
+func confinedLocalNode(root fs.FS, rel string) (*localNode, error) {
+	info, err := fs.Lstat(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	if systemIdentity(info) == "" {
+		return nil, fmt.Errorf("local deletion requires Unix filesystem identity")
+	}
+	node := &localNode{relPath: filepath.FromSlash(rel), info: info}
+	if info.IsDir() {
+		entries, err := fs.ReadDir(root, rel)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			child, err := confinedLocalNode(root, rel+"/"+entry.Name())
+			if err != nil {
+				return nil, err
+			}
+			node.children = append(node.children, child)
+		}
+	}
+	node.object.ID = localID(node.relPath, info, node.children)
+	return node, nil
 }

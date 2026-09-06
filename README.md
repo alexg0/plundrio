@@ -352,6 +352,16 @@ unmanaged siblings are reported separately, while a wholly unmanaged directory
 is one object whose size includes its contents. The command never creates a
 missing Put.io folder and does not move, rename, download, or delete anything.
 
+Use the same `--use-categories-putio` setting (or config/environment value)
+as `run`: ownership includes the configured folder and, when enabled, its
+direct category folders only. Deeper transfers are outside the monitor's scope.
+Persisted categories protect both bare and category-local active paths, even
+when category state is stale. The root's `.plundrio-state.json` and
+`.plundrio-files/` are reserved internal state and are never cleanup candidates.
+An unmanaged object has no matching current transfer; that alone does not prove
+it was imported or is disposable. Review the report and verify retained copies
+before selecting IDs.
+
 ### Delete selected unmanaged downloads
 
 Pass exact IDs from a current report and explicitly select the roots in scope.
@@ -373,10 +383,16 @@ plundrio reconcile delete \
 ```
 
 `--putio` and `--local` are independent and may be combined only when both
-roots are intended. Before every applied deletion, Plundrio rebuilds the
-reconciliation report and refuses an ID that is active, moved, missing, or no
-longer unmanaged. Local removal uses Go's root-confined filesystem API and
-rejects symlink objects. The JSON result records every selected object's path,
+roots are intended. Plundrio inventories the roots once per batch, then refreshes
+each selected branch and current transfer ownership before its applied deletion.
+It refuses IDs that are active, missing, or no longer unmanaged. Unrelated remote
+and local subtrees are not crawled again. Local removal rechecks the selected
+tree's identity through Go's root-confined filesystem API and rejects symlink
+objects and parents. Local deletion requires Unix filesystem identity and fails
+closed on other platforms; read-only reports, dry runs, and Put.io deletion remain
+available. No filesystem/API transaction can exclude a concurrent writer after
+the final check; stop writers while applying a reviewed batch.
+The JSON result records every selected object's path,
 size, status, reason, and error; skipped or failed objects make the command exit
 non-zero after the complete batch is reported.
 

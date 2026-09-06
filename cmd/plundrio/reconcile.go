@@ -28,6 +28,7 @@ func newReconcileCmd() *cobra.Command {
 	cmd.PersistentFlags().StringP("target", "t", "", "Local download root (required)")
 	cmd.PersistentFlags().StringP("folder", "f", "plundrio", "Put.io download folder name")
 	cmd.PersistentFlags().StringP("token", "k", "", "Put.io OAuth token (required)")
+	cmd.PersistentFlags().Bool("use-categories-putio", false, "Include direct Put.io category folders, matching run")
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "report",
@@ -103,9 +104,10 @@ func writeDeleteReport(cmd *cobra.Command, report reconcile.DeleteReport) error 
 }
 
 type reconcileConfig struct {
-	target string
-	folder string
-	token  string
+	target             string
+	folder             string
+	token              string
+	useCategoriesPutio bool
 }
 
 func loadReconcileConfig(cmd *cobra.Command) (reconcileConfig, error) {
@@ -126,9 +128,10 @@ func loadReconcileConfig(cmd *cobra.Command) (reconcileConfig, error) {
 	}
 
 	cfg := reconcileConfig{
-		target: v.GetString("target"),
-		folder: strings.ToLower(v.GetString("folder")),
-		token:  v.GetString("token"),
+		target:             v.GetString("target"),
+		folder:             strings.ToLower(v.GetString("folder")),
+		token:              v.GetString("token"),
+		useCategoriesPutio: v.GetBool("use-categories-putio"),
 	}
 	if cfg.target == "" || cfg.folder == "" || cfg.token == "" {
 		return reconcileConfig{}, fmt.Errorf("target, folder, and token are required")
@@ -163,7 +166,7 @@ func openReconcileService(ctx context.Context, cfg reconcileConfig) (*reconcile.
 	if err != nil {
 		return nil, err
 	}
-	return reconcile.New(client, folderID, cfg.target), nil
+	return reconcile.New(client, folderID, cfg.target, cfg.useCategoriesPutio), nil
 }
 
 func writeJSON(cmd *cobra.Command, value any) error {

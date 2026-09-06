@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/elsbrock/go-putio"
+	"github.com/elsbrock/plundrio/internal/download"
 )
 
 type fakeClient struct {
@@ -21,11 +22,17 @@ type fakeClient struct {
 	files          map[int64][]*putio.File
 	deleteErrors   map[int64]error
 	deleted        []int64
+	fileCalls      map[int64]int
+	onTransfers    func(int)
+	onDelete       func(int64)
 }
 
 func (f *fakeClient) GetTransfers(context.Context) ([]*putio.Transfer, error) {
 	index := f.transferCalls
 	f.transferCalls++
+	if f.onTransfers != nil {
+		f.onTransfers(f.transferCalls)
+	}
 	if len(f.transferStates) != 0 {
 		if index >= len(f.transferStates) {
 			index = len(f.transferStates) - 1
@@ -36,6 +43,10 @@ func (f *fakeClient) GetTransfers(context.Context) ([]*putio.Transfer, error) {
 }
 
 func (f *fakeClient) GetFiles(_ context.Context, folderID int64) ([]*putio.File, error) {
+	if f.fileCalls == nil {
+		f.fileCalls = make(map[int64]int)
+	}
+	f.fileCalls[folderID]++
 	return f.files[folderID], nil
 }
 
@@ -44,6 +55,9 @@ func (f *fakeClient) DeleteFile(_ context.Context, fileID int64) error {
 		return err
 	}
 	f.deleted = append(f.deleted, fileID)
+	if f.onDelete != nil {
+		f.onDelete(fileID)
+	}
 	return nil
 }
 
@@ -52,7 +66,7 @@ func TestReconcileReportsOnlyUnownedObjectsAsUnmanaged(t *testing.T) {
 	mustMkdir(t, filepath.Join(root, "tv", "Active.Show"))
 	mustWrite(t, filepath.Join(root, "tv", "Active.Show", "episode.mkv"), "active")
 	mustWrite(t, filepath.Join(root, "tv", "leftover.mkv"), "leftover")
-	mustWrite(t, filepath.Join(root, stateFileName), `{"active-hash":"tv"}`)
+	mustWrite(t, filepath.Join(root, download.CategoryStateFileName), `{"10":"tv"}`)
 
 	client := &fakeClient{
 		transfers: []*putio.Transfer{{
@@ -67,7 +81,7 @@ func TestReconcileReportsOnlyUnownedObjectsAsUnmanaged(t *testing.T) {
 		},
 	}
 
-	report, err := New(client, 1, root).Reconcile(context.Background())
+	report, err := New(client, 1, root, true).Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +105,7 @@ func TestReconcileHandlesNestedAndEmptyRootsDeterministically(t *testing.T) {
 	mustWrite(t, filepath.Join(root, "category", "active", "file"), "123")
 	mustWrite(t, filepath.Join(root, "category", "z-unmanaged"), "12")
 	mustWrite(t, filepath.Join(root, "category", "a-unmanaged"), "1")
-	mustWrite(t, filepath.Join(root, stateFileName), `{"nested-hash":"category"}`)
+	mustWrite(t, filepath.Join(root, download.CategoryStateFileName), `{"1":"category"}`)
 
 	client := &fakeClient{
 		transfers: []*putio.Transfer{{ID: 1, FileID: 11, Hash: "nested-hash", Name: "active", SaveParentID: 7}},
@@ -102,7 +116,7 @@ func TestReconcileHandlesNestedAndEmptyRootsDeterministically(t *testing.T) {
 		},
 	}
 
-	service := New(client, 7, root)
+	service := New(client, 7, root, true)
 	first, err := service.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +141,7 @@ func TestReconcileHandlesNestedAndEmptyRootsDeterministically(t *testing.T) {
 		t.Fatalf("unmanaged objects = %v, want %v", got, want)
 	}
 
-	empty, err := New(&fakeClient{files: map[int64][]*putio.File{}}, 9, t.TempDir()).Reconcile(context.Background())
+	empty, err := New(&fakeClient{files: map[int64][]*putio.File{}}, 9, t.TempDir(), true).Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +156,7 @@ func TestReconcileRejectsUnsafeActiveLocalPath(t *testing.T) {
 		transfers: []*putio.Transfer{{ID: 1, Name: "../../../outside", SaveParentID: 1}},
 		files:     map[int64][]*putio.File{},
 	}
-	if _, err := New(client, 1, root).Reconcile(context.Background()); err == nil {
+	if _, err := New(client, 1, root, true).Reconcile(context.Background()); err == nil {
 		t.Fatal("expected unsafe transfer path to fail reconciliation")
 	}
 }
@@ -154,7 +168,7 @@ func TestDeleteDefaultsToDryRun(t *testing.T) {
 		1: {putioFile(2, "remote.bin", 1, false, 6)},
 	}}
 
-	service := New(client, 1, root)
+	service := New(client, 1, root, true)
 	report, err := service.Delete(context.Background(), DeleteOptions{
 		IDs: []string{unmanagedObjectID(t, service, "local", "local.bin"), "putio:2"}, Putio: true, Local: true,
 	})
@@ -180,7 +194,7 @@ func TestDeleteDryRunReconcilesBatchOnce(t *testing.T) {
 		},
 	}}
 
-	report, err := New(client, 1, t.TempDir()).Delete(context.Background(), DeleteOptions{
+	report, err := New(client, 1, t.TempDir(), true).Delete(context.Background(), DeleteOptions{
 		IDs: []string{"putio:2", "putio:3"}, Putio: true,
 	})
 	if err != nil {
@@ -206,7 +220,7 @@ func TestDeleteApplyRefreshesAfterDeletion(t *testing.T) {
 		}},
 	}
 
-	report, err := New(client, 1, t.TempDir()).Delete(context.Background(), DeleteOptions{
+	report, err := New(client, 1, t.TempDir(), true).Delete(context.Background(), DeleteOptions{
 		IDs: []string{"putio:2", "putio:3"}, Putio: true, Apply: true,
 	})
 	if err != nil {
@@ -221,13 +235,13 @@ func TestDeleteApplyRefreshesAfterDeletion(t *testing.T) {
 	if !reflect.DeepEqual(client.deleted, []int64{2}) {
 		t.Fatalf("deleted objects = %v, want [2]", client.deleted)
 	}
-	if client.transferCalls != 2 {
-		t.Fatalf("GetTransfers calls = %d, want 2", client.transferCalls)
+	if client.transferCalls != 3 {
+		t.Fatalf("GetTransfers calls = %d, want 3 (inventory plus each target)", client.transferCalls)
 	}
 }
 
 func TestDeleteRequiresExplicitIDsAndSourceSelection(t *testing.T) {
-	service := New(&fakeClient{}, 1, t.TempDir())
+	service := New(&fakeClient{}, 1, t.TempDir(), true)
 	tests := []DeleteOptions{
 		{IDs: []string{"putio:2"}},
 		{Putio: true},
@@ -250,7 +264,7 @@ func TestDeleteRefusesObjectThatBecameActive(t *testing.T) {
 		},
 		files: map[int64][]*putio.File{1: {putioFile(2, "remote.bin", 1, false, 6)}},
 	}
-	service := New(client, 1, root)
+	service := New(client, 1, root, true)
 	original, err := service.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -308,7 +322,7 @@ func TestDeleteRefusesChangedLocalSnapshot(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			test.setup(t, root)
-			service := New(&fakeClient{files: map[int64][]*putio.File{}}, 1, root)
+			service := New(&fakeClient{files: map[int64][]*putio.File{}}, 1, root, true)
 			id := unmanagedObjectID(t, service, "local", test.path)
 			test.change(t, root)
 
@@ -334,7 +348,7 @@ func TestDeleteKeepsPutioAndLocalSelectionsIndependent(t *testing.T) {
 		mustWrite(t, filepath.Join(root, "local.bin"), "local")
 		client := &fakeClient{files: map[int64][]*putio.File{1: {putioFile(2, "remote.bin", 1, false, 6)}}}
 
-		report, err := New(client, 1, root).Delete(context.Background(), DeleteOptions{
+		report, err := New(client, 1, root, true).Delete(context.Background(), DeleteOptions{
 			IDs: []string{"putio:2"}, Putio: true, Apply: true,
 		})
 		if err != nil {
@@ -353,7 +367,7 @@ func TestDeleteKeepsPutioAndLocalSelectionsIndependent(t *testing.T) {
 		mustWrite(t, filepath.Join(root, "local.bin"), "local")
 		client := &fakeClient{files: map[int64][]*putio.File{1: {putioFile(2, "remote.bin", 1, false, 6)}}}
 
-		service := New(client, 1, root)
+		service := New(client, 1, root, true)
 		report, err := service.Delete(context.Background(), DeleteOptions{
 			IDs: []string{unmanagedObjectID(t, service, "local", "local.bin")}, Local: true, Apply: true,
 		})
@@ -379,7 +393,7 @@ func TestDeleteReportsPartialFailureAndContinues(t *testing.T) {
 		deleteErrors: map[int64]error{3: errors.New("remote refused deletion")},
 	}
 
-	report, err := New(client, 1, root).Delete(context.Background(), DeleteOptions{
+	report, err := New(client, 1, root, true).Delete(context.Background(), DeleteOptions{
 		IDs: []string{"putio:3", "putio:2"}, Putio: true, Apply: true,
 	})
 	if err != nil {
@@ -408,7 +422,7 @@ func TestDeleteRejectsTraversalAndSymlinkEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &fakeClient{files: map[int64][]*putio.File{}}
-	service := New(client, 1, root)
+	service := New(client, 1, root, true)
 	report, err := service.Delete(context.Background(), DeleteOptions{
 		IDs: []string{unmanagedObjectID(t, service, "local", "escape")}, Local: true, Apply: true,
 	})

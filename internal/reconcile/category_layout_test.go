@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/elsbrock/go-putio"
+	"github.com/elsbrock/plundrio/internal/download"
 )
 
 type activatesWhileListingClient struct {
@@ -33,7 +34,7 @@ func TestReconcileRecognizesTransferIDCategoriesAndNestedPutioFolders(t *testing
 	root := t.TempDir()
 	mustMkdir(t, filepath.Join(root, "tv", "Active.Show"))
 	mustWrite(t, filepath.Join(root, "tv", "Active.Show", "episode.mkv"), "active")
-	mustWrite(t, filepath.Join(root, stateFileName), `{"10":"tv"}`)
+	mustWrite(t, filepath.Join(root, download.CategoryStateFileName), `{"10":"tv"}`)
 
 	client := &fakeClient{
 		transfers: []*putio.Transfer{{
@@ -46,7 +47,7 @@ func TestReconcileRecognizesTransferIDCategoriesAndNestedPutioFolders(t *testing
 		},
 	}
 
-	report, err := New(client, 1, root).Reconcile(context.Background())
+	report, err := New(client, 1, root, true).Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +64,7 @@ func TestReconcileProtectsBarePathWhenCategoryStateIsStale(t *testing.T) {
 	root := t.TempDir()
 	mustMkdir(t, filepath.Join(root, "Active.Show"))
 	mustWrite(t, filepath.Join(root, "Active.Show", "episode.mkv"), "active")
-	mustWrite(t, filepath.Join(root, stateFileName), `{"10":"tv"}`)
+	mustWrite(t, filepath.Join(root, download.CategoryStateFileName), `{"10":"tv"}`)
 
 	client := &fakeClient{
 		transfers: []*putio.Transfer{{
@@ -72,7 +73,7 @@ func TestReconcileProtectsBarePathWhenCategoryStateIsStale(t *testing.T) {
 		files: map[int64][]*putio.File{},
 	}
 
-	report, err := New(client, 1, root).Reconcile(context.Background())
+	report, err := New(client, 1, root, true).Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +86,7 @@ func TestReconcileProtectsBarePathWhenCategoryStateIsStale(t *testing.T) {
 }
 
 func TestReconcileSamplesOwnershipAfterEnumeratingCandidates(t *testing.T) {
-	report, err := New(&activatesWhileListingClient{}, 1, t.TempDir()).Reconcile(context.Background())
+	report, err := New(&activatesWhileListingClient{}, 1, t.TempDir(), true).Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +103,7 @@ func TestLocalReportIDsBindToTheCurrentObjectTree(t *testing.T) {
 	mustMkdir(t, filepath.Join(root, "leftover"))
 	child := filepath.Join(root, "leftover", "file.bin")
 	mustWrite(t, child, "same-size")
-	service := New(&fakeClient{files: map[int64][]*putio.File{}}, 1, root)
+	service := New(&fakeClient{files: map[int64][]*putio.File{}}, 1, root, true)
 
 	first := localUnmanagedObject(t, service, "leftover")
 	if err := os.Remove(child); err != nil {
@@ -132,7 +133,7 @@ func TestLocalOwnershipUsesFilesystemIdentity(t *testing.T) {
 		files:     map[int64][]*putio.File{},
 	}
 
-	report, err := New(client, 1, root).Reconcile(context.Background())
+	report, err := New(client, 1, root, true).Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
