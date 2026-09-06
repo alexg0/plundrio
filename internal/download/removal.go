@@ -48,49 +48,53 @@ func (m *Manager) removalCategory(id int64) (string, error) {
 // PrepareRemoval durably suppresses new processing before remote deletion. The
 // processor lock lets an already-running queue pass finish before we forget it;
 // queued jobs and retry attempts check the marker before starting another file.
-func (m *Manager) PrepareRemoval(id int64) error {
+// The returned category is captured under the same lock as marker reclamation.
+func (m *Manager) PrepareRemoval(id int64) (string, error) {
 	m.removalMu.Lock()
 	defer m.removalMu.Unlock()
+	category := m.categories.Get(id)
 	if m.RemovalPending(id) {
-		if _, err := m.removalCategory(id); err != nil {
-			return err
+		var err error
+		category, err = m.removalCategory(id)
+		if err != nil {
+			return "", err
 		}
 	} else {
 		if id <= 0 {
-			return fmt.Errorf("removal requires a positive transfer ID")
+			return "", fmt.Errorf("removal requires a positive transfer ID")
 		}
 		if err := os.MkdirAll(m.transferFiles.stateDir, 0700); err != nil {
-			return err
+			return "", err
 		}
-		data, err := json.Marshal(m.categories.Get(id))
+		data, err := json.Marshal(category)
 		if err != nil {
-			return err
+			return "", err
 		}
 		file, err := os.CreateTemp(m.transferFiles.stateDir, ".removing-*")
 		if err != nil {
-			return err
+			return "", err
 		}
 		defer os.Remove(file.Name())
 		if _, err := file.Write(data); err != nil {
 			file.Close()
-			return err
+			return "", err
 		}
 		if err := file.Sync(); err != nil {
 			file.Close()
-			return err
+			return "", err
 		}
 		if err := file.Close(); err != nil {
-			return err
+			return "", err
 		}
 		if err := os.Rename(file.Name(), m.removalPath(id)); err != nil {
-			return err
+			return "", err
 		}
 	}
 	m.processor.forget(id)
 	m.categories.Remove(id)
 	log.Warn("transfers").Int64("transfer_id", id).
 		Msg("Transfer removal pending; released memory and suspended processing until remote deletion succeeds")
-	return nil
+	return category, nil
 }
 
 // Snapshot only existing markers BEFORE fetching the full remote list. A marker

@@ -36,7 +36,7 @@ type DownloadService interface {
 	GetCategory(transferID int64) string
 	RemoveCategory(transferID int64)
 	RemoveTransfer(transferID int64)
-	PrepareRemoval(transferID int64) error
+	PrepareRemoval(transferID int64) (string, error)
 	RemovalPending(transferID int64) bool
 }
 

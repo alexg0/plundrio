@@ -503,9 +503,12 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 
 		// Capture the deletion destination before remote mutation: the monitor
 		// may reclaim the durable category as soon as remote absence is visible.
-		category := s.localCategory(transfer.ID)
-		if err := s.dlService.PrepareRemoval(transfer.ID); err != nil {
+		category, err := s.dlService.PrepareRemoval(transfer.ID)
+		if err != nil {
 			return nil, fmt.Errorf("preserve removal state for transfer %d: %w", transfer.ID, err)
+		}
+		if !s.cfg.UseCategoriesTarget {
+			category = ""
 		}
 
 		// Seeding-only transfers (where the file was already deleted) have no

@@ -105,13 +105,13 @@ func (s *torrentAddDownloadService) GetCategory(transferID int64) string {
 	return s.categories[transferID]
 }
 
-func (s *torrentAddDownloadService) PrepareRemoval(id int64) error {
+func (s *torrentAddDownloadService) PrepareRemoval(id int64) (string, error) {
 	if s.pending == nil {
 		s.pending = make(map[int64]string)
 	}
 	s.pending[id] = s.GetCategory(id)
 	delete(s.categories, id)
-	return nil
+	return s.pending[id], nil
 }
 
 func (s *torrentAddDownloadService) RemovalPending(id int64) bool {
