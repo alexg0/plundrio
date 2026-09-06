@@ -157,6 +157,10 @@ func New(cfg *config.Config, client PutioClient) *Manager {
 		}
 
 		// Delete only the source file from Put.io, but keep the transfer
+		// Zero identifies Put.io's account root, not a transfer-owned file.
+		if state.FileID == 0 {
+			return nil
+		}
 		if err := m.client.DeleteFile(m.Context(), state.FileID); err != nil {
 			log.Error("cleanup").
 				Int64("transfer_id", transferID).
