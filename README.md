@@ -388,9 +388,7 @@ plundrio uses your system's network configuration. If your system routes through
 **How can I monitor plundrio's status?**<br/>
 plundrio logs its activities to stdout. You can redirect these logs to a file or use a log management system.
 
-## 🤝 Contributing
-
-### Transmission restart and file metadata
+## Transmission restart and file metadata
 
 After restart, a Put.io `COMPLETED` or `SEEDING` transfer initially reports
 50% / downloading until Plundrio restores or verifies its local completion.
@@ -404,6 +402,27 @@ root. Preserve it across restarts and exclude it from media scans, filesystem
 reconciliation, and unmanaged-file deletion. Transmission `files` names are
 relative to `downloadDir`; `bytesCompleted` currently reports whole-transfer
 completion (zero until complete, then each file's full length).
+
+`torrent-remove` persists a removal marker before deleting remote data. Remote
+transfer deletion gets at most three attempts per request. If it still fails,
+the RPC returns an error, the torrent reports stopped with a removal error,
+and local processing stays suspended across restarts. Local files are retained
+on that failure even when `delete-local-data` was requested; repeat the request
+after fixing Put.io access to finish removal.
+
+Pending removals release active category, transfer, and retry tracking. Their
+category and ownership manifest stay on disk under `.plundrio-files/`, without
+a permanent in-memory tombstone cache. Metadata is removed after a successful
+retry or after a successful full Put.io listing confirms the ID is absent and
+any active local worker has drained. Moving a transfer outside the configured
+folder does not count as deletion. Disk retention is bounded by surviving
+remote records, not a time limit: during an API outage these safety records
+remain. To resolve one manually, delete that exact transfer on Put.io and let
+the next successful poll reclaim its metadata; do not delete marker files to
+force a retry. An already-running file download may finish, but queued work,
+new attempts, and source cleanup cannot restart the removed transfer.
+
+## 🤝 Contributing
 
 Contributions to plundrio are welcome! Here's how you can contribute:
 

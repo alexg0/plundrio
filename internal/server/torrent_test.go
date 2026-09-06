@@ -75,6 +75,7 @@ type torrentAddDownloadService struct {
 	files            map[int64][]download.TransferFile
 	transfers        []*putio.Transfer
 	removedTransfers []int64
+	pending          map[int64]string
 }
 
 func (s *torrentAddDownloadService) GetTransfers() []*putio.Transfer {
@@ -98,7 +99,24 @@ func (s *torrentAddDownloadService) SetCategory(transferID int64, category strin
 }
 
 func (s *torrentAddDownloadService) GetCategory(transferID int64) string {
+	if category, ok := s.pending[transferID]; ok {
+		return category
+	}
 	return s.categories[transferID]
+}
+
+func (s *torrentAddDownloadService) PrepareRemoval(id int64) error {
+	if s.pending == nil {
+		s.pending = make(map[int64]string)
+	}
+	s.pending[id] = s.GetCategory(id)
+	delete(s.categories, id)
+	return nil
+}
+
+func (s *torrentAddDownloadService) RemovalPending(id int64) bool {
+	_, ok := s.pending[id]
+	return ok
 }
 
 func (s *torrentAddDownloadService) RemoveCategory(transferID int64) {
@@ -108,6 +126,7 @@ func (s *torrentAddDownloadService) RemoveCategory(transferID int64) {
 func (s *torrentAddDownloadService) RemoveTransfer(transferID int64) {
 	s.removedTransfers = append(s.removedTransfers, transferID)
 	delete(s.files, transferID)
+	delete(s.pending, transferID)
 }
 
 func TestHandleTorrentAddReturnsMagnetTrackingFields(t *testing.T) {

@@ -392,6 +392,13 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 			}
 			torrentInfo["files"] = files
 		}
+		if s.dlService.RemovalPending(t.ID) {
+			// A failed removal is terminal local state, even without a context.
+			torrentInfo["status"] = trStatusStopped
+			torrentInfo["rateDownload"] = 0
+			torrentInfo["error"] = true
+			torrentInfo["errorString"] = "remote deletion pending; retry torrent-remove or remove the transfer on Put.io"
+		}
 
 		torrents = append(torrents, torrentInfo)
 
@@ -494,6 +501,10 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 			continue
 		}
 
+		if err := s.dlService.PrepareRemoval(transfer.ID); err != nil {
+			return nil, fmt.Errorf("preserve removal state for transfer %d: %w", transfer.ID, err)
+		}
+
 		// Seeding-only transfers (where the file was already deleted) have no
 		// file_id. Calling DeleteFile(0) would target the root folder and
 		// cascade-delete everything in the account.
@@ -512,15 +523,22 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 				Msg("Failed to delete transfer files")
 		}
 
-		remoteDeleted := true
-		if err := s.client.DeleteTransfer(ctx, transfer.ID); err != nil {
-			remoteDeleted = false
+		const maxRemovalAttempts = 3
+		var removalErr error
+		for attempt := 0; attempt < maxRemovalAttempts; attempt++ {
+			removalErr = s.client.DeleteTransfer(ctx, transfer.ID)
+			if removalErr == nil || ctx.Err() != nil {
+				break
+			}
+		}
+		if removalErr != nil {
 			log.Error("rpc").
 				Str("operation", "torrent-remove").
 				Str("id", id.String()).
 				Int64("transfer_id", transfer.ID).
-				Err(err).
+				Err(removalErr).
 				Msg("Failed to delete transfer")
+			return nil, fmt.Errorf("remove transfer %d after at most %d attempts; local processing suspended, retry torrent-remove: %w", transfer.ID, maxRemovalAttempts, removalErr)
 		} else {
 			log.Info("rpc").
 				Str("operation", "torrent-remove").
@@ -549,13 +567,8 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 			}
 		}
 
-		// Preserve the category and durable manifest while the remote transfer
-		// still exists. They are required to reconstruct exact ownership after a
-		// restart, especially if source-file deletion already succeeded.
-		if remoteDeleted {
-			s.dlService.RemoveCategory(transfer.ID)
-			s.dlService.RemoveTransfer(transfer.ID)
-		}
+		s.dlService.RemoveCategory(transfer.ID)
+		s.dlService.RemoveTransfer(transfer.ID)
 	}
 
 	return struct{}{}, nil

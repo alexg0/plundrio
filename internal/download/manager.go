@@ -2,6 +2,7 @@ package download
 
 import (
 	"context"
+	"os"
 	"sync"
 	"time"
 
@@ -33,6 +34,7 @@ type Manager struct {
 	coordinator           *TransferCoordinator // Coordinates transfer lifecycle
 	categories            *CategoryStore       // Maps transfer hash → category subfolder
 	transferFiles         *TransferFileStore   // Persists exact local files by transfer ID
+	removalMu             sync.RWMutex         // Serializes removal with transfer initialization/queueing
 	activeFiles           sync.Map             // map[int64]int64 - tracks files being downloaded, FileID -> TransferID
 	downloadRetryAttempts sync.Map             // map[int64]int - bounded local retry rounds by FileID
 	downloadRetryDelay    func(int) (time.Duration, bool)
@@ -93,6 +95,10 @@ func (m *Manager) SetCategory(transferID int64, category string) {
 
 // GetCategory returns the category for a put.io transfer ID, or "" if none.
 func (m *Manager) GetCategory(transferID int64) string {
+	if m.RemovalPending(transferID) {
+		category, _ := m.removalCategory(transferID)
+		return category
+	}
 	return m.categories.Get(transferID)
 }
 
@@ -107,19 +113,29 @@ func (m *Manager) localCategory(transferID int64) string {
 	if !m.cfg.UseCategoriesTarget {
 		return ""
 	}
-	return m.categories.Get(transferID)
+	return m.GetCategory(transferID)
 }
 
 // RemoveTransfer stops tracking a transfer and drops its local bookkeeping.
 // Called once *arr removes the torrent; without it, tracking state would grow
 // for the lifetime of the process.
 func (m *Manager) RemoveTransfer(transferID int64) {
+	m.removalMu.Lock()
+	defer m.removalMu.Unlock()
 	m.processor.forget(transferID)
+	// In-flight workers must finish before removing their suppression marker.
+	if m.activeFileCount(transferID) > 0 && m.RemovalPending(transferID) {
+		return
+	}
 	if err := m.transferFiles.Remove(transferID); err != nil {
 		log.Error("files").
 			Int64("transfer_id", transferID).
 			Err(err).
 			Msg("Failed to remove transfer file state")
+		return
+	}
+	if err := os.Remove(m.removalPath(transferID)); err != nil && !os.IsNotExist(err) {
+		log.Error("files").Err(err).Msg("Failed to remove transfer removal marker")
 	}
 }
 
@@ -265,6 +281,10 @@ func (m *Manager) Stop() {
 // once the queue is full, and blocking there while holding m.mu would
 // deadlock against Stop.
 func (m *Manager) QueueDownload(job downloadJob) {
+	if m.RemovalPending(job.TransferID) {
+		m.downloadRetryAttempts.Delete(job.FileID)
+		return
+	}
 	// Refuse new work once shutdown has begun. This is checked before claiming
 	// the file because the queue is buffered: after the workers exit, a send
 	// still succeeds, which would otherwise leave the file marked active with

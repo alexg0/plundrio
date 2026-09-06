@@ -36,6 +36,8 @@ type DownloadService interface {
 	GetCategory(transferID int64) string
 	RemoveCategory(transferID int64)
 	RemoveTransfer(transferID int64)
+	PrepareRemoval(transferID int64) error
+	RemovalPending(transferID int64) bool
 }
 
 // Server handles transmission-rpc requests

@@ -94,11 +94,13 @@ func (m *Manager) monitorTransfers() {
 func (p *TransferProcessor) checkTransfers() {
 	log.Debug("transfers").Msg("Checking transfers")
 
+	pending := p.manager.pendingRemovals()
 	transfers, err := p.manager.client.GetTransfers(p.manager.Context())
 	if err != nil {
 		log.Error("transfers").Err(err).Msg("Failed to get transfers")
 		return
 	}
+	p.manager.pruneRemovals(pending, transfers)
 
 	log.Debug("transfers").
 		Int("api_transfers_count", len(transfers)).
@@ -122,6 +124,9 @@ func (p *TransferProcessor) checkTransfers() {
 			continue
 		}
 		inFolder = append(inFolder, t)
+		if p.manager.RemovalPending(t.ID) {
+			continue
+		}
 		byStatus[t.Status] = append(byStatus[t.Status], t)
 	}
 
@@ -344,6 +349,9 @@ const maxReprocessAttempts = 3
 // forever, so it was never retried, its put.io file was never cleaned up, and
 // *arr never saw it complete.
 func (p *TransferProcessor) shouldProcess(transfer *putio.Transfer) bool {
+	if p.manager.RemovalPending(transfer.ID) {
+		return false
+	}
 	ctx, exists := p.manager.coordinator.GetTransferContext(transfer.ID)
 	if !exists {
 		return true
@@ -417,6 +425,11 @@ func (p *TransferProcessor) startTransferProcessing(transfer *putio.Transfer) {
 
 // processTransfer handles downloading of a completed or seeding transfer
 func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
+	p.manager.removalMu.RLock()
+	defer p.manager.removalMu.RUnlock()
+	if p.manager.RemovalPending(transfer.ID) {
+		return
+	}
 	log.Debug("transfers").
 		Str("name", transfer.Name).
 		Int64("id", transfer.ID).

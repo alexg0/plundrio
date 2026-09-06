@@ -176,7 +176,7 @@ func TestHandleTorrentRemoveNumericID(t *testing.T) {
 	}
 }
 
-func TestHandleTorrentRemoveRetainsBookkeepingWhenRemoteDeletionFails(t *testing.T) {
+func TestHandleTorrentRemoveBoundsFailuresAndRetainsOwnership(t *testing.T) {
 	transfer := &putio.Transfer{ID: 101, Name: "Book", FileID: 501}
 	client := &torrentAddClient{
 		transfers:         []*putio.Transfer{transfer},
@@ -191,18 +191,45 @@ func TestHandleTorrentRemoveRetainsBookkeepingWhenRemoteDeletionFails(t *testing
 	}
 	server := &Server{cfg: &config.Config{TargetDir: t.TempDir()}, client: client, dlService: service}
 
-	if _, err := server.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[101]}`)); err != nil {
-		t.Fatal(err)
+	if _, err := server.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[101]}`)); err == nil {
+		t.Fatal("expected actionable remote deletion error")
+	}
+	if len(client.deleted) != 3 {
+		t.Fatalf("remote attempts = %d, want 3", len(client.deleted))
 	}
 
 	if len(service.removedTransfers) != 0 {
 		t.Fatalf("removed local transfers = %v, want none", service.removedTransfers)
 	}
-	if got := service.categories[101]; got != "books" {
+	if got := service.GetCategory(101); got != "books" {
 		t.Fatalf("retained category = %q, want books", got)
+	}
+	if len(service.categories) != 0 || !service.RemovalPending(101) {
+		t.Fatal("failed removal retained active category tracking")
 	}
 	if _, ok := service.files[101]; !ok {
 		t.Fatal("durable manifest was discarded after remote deletion failed")
+	}
+	response, err := server.handleTorrentGet(context.Background(), json.RawMessage(`{"ids":[101]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Torrents []struct {
+			Status      int
+			ErrorString string
+		}
+	}
+	decodeResponse(t, response, &decoded)
+	if len(decoded.Torrents) != 1 || decoded.Torrents[0].Status != trStatusStopped || decoded.Torrents[0].ErrorString == "" {
+		t.Fatalf("pending removal not actionable: %+v", decoded)
+	}
+	client.deleteTransferErr = nil
+	if _, err := server.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[101]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if service.RemovalPending(101) || len(service.files) != 0 {
+		t.Fatal("successful retry retained removal state")
 	}
 }
 
