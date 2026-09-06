@@ -501,6 +501,9 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 			continue
 		}
 
+		// Capture the deletion destination before remote mutation: the monitor
+		// may reclaim the durable category as soon as remote absence is visible.
+		category := s.localCategory(transfer.ID)
 		if err := s.dlService.PrepareRemoval(transfer.ID); err != nil {
 			return nil, fmt.Errorf("preserve removal state for transfer %d: %w", transfer.ID, err)
 		}
@@ -549,7 +552,6 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 		}
 
 		if params.DeleteLocalData {
-			category := s.localCategory(transfer.ID)
 			localTargetDir := filepath.Join(s.cfg.TargetDir, category)
 			if err := deleteLocalData(localTargetDir, transfer.Name); err != nil {
 				log.Error("rpc").

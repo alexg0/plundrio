@@ -261,3 +261,52 @@ func decodeResponse(t *testing.T, response interface{}, target interface{}) {
 		t.Fatal(err)
 	}
 }
+
+type pruningRemovalClient struct {
+	*torrentAddClient
+	manager *download.Manager
+}
+
+func (c *pruningRemovalClient) DeleteTransfer(ctx context.Context, id int64) error {
+	if err := c.torrentAddClient.DeleteTransfer(ctx, id); err != nil {
+		return err
+	}
+	// Simulate the monitor observing remote absence after deletion, before
+	// the RPC request resumes its local cleanup. This is the same reclamation
+	// operation invoked by pruneRemovals when no workers remain active.
+	c.manager.RemoveTransfer(id)
+	return nil
+}
+
+func TestTorrentRemoveKeepsCategoryWhenMonitorPrunesMarker(t *testing.T) {
+	root := t.TempDir()
+	for _, path := range []string{"Book/keep", "books/Book/remove"} {
+		full := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("payload"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{TargetDir: root, UseCategoriesTarget: true}
+	manager := download.New(cfg, nil)
+	manager.SetCategory(101, "books")
+	client := &pruningRemovalClient{
+		torrentAddClient: &torrentAddClient{transfers: []*putio.Transfer{{ID: 101, Name: "Book"}}},
+		manager:          manager,
+	}
+	srv := &Server{cfg: cfg, client: client, dlService: manager}
+	if _, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[101],"delete-local-data":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if manager.RemovalPending(101) {
+		t.Fatal("test did not reclaim removal marker")
+	}
+	if _, err := os.Stat(filepath.Join(root, "Book", "keep")); err != nil {
+		t.Fatalf("unrelated bare-path payload was deleted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "books", "Book")); !os.IsNotExist(err) {
+		t.Fatalf("selected category payload was not removed: %v", err)
+	}
+}
