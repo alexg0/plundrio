@@ -362,6 +362,11 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 		}
 		errorCode := trErrorNone
 		errorString := t.ErrorMessage
+		if transferCtx != nil {
+			if localErr := transferCtx.GetError(); localErr != nil {
+				errorString = localErr.Error()
+			}
+		}
 		if errorString != "" {
 			errorCode = trErrorLocal
 		}

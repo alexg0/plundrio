@@ -3,10 +3,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/elsbrock/go-putio"
 	"github.com/elsbrock/plundrio/internal/config"
+	"github.com/elsbrock/plundrio/internal/download"
 )
 
 func TestHandleTorrentGetUsesTransmissionErrorFields(t *testing.T) {
@@ -60,5 +62,34 @@ func TestHandleTorrentGetUsesTransmissionErrorFields(t *testing.T) {
 				t.Errorf("errorString = %#v, want %q", got, tt.errorString)
 			}
 		})
+	}
+}
+
+func TestTorrentGetReportsLocalOwnershipFailure(t *testing.T) {
+	coordinator := download.NewTransferCoordinator()
+	ctx := coordinator.InitiateTransfer(42, "Book", 0, 0)
+	want := "parse transfer file state: invalid manifest"
+	if err := coordinator.FailTransfer(42, errors.New(want)); err != nil {
+		t.Fatal(err)
+	}
+	service := &torrentAddDownloadService{
+		transfers: []*putio.Transfer{{ID: 42, Name: "Book", Status: "COMPLETED", PercentDone: 100, ErrorMessage: "older remote error"}},
+		contexts:  map[int64]*download.TransferContext{42: ctx},
+	}
+	server := &Server{cfg: &config.Config{TargetDir: t.TempDir()}, dlService: service}
+	result, err := server.handleTorrentGet(context.Background(), json.RawMessage(`{"fields":["error","errorString","seedIdleMode"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Torrents []struct {
+			Error        int
+			ErrorString  string
+			SeedIdleMode int
+		}
+	}
+	decodeResponse(t, result, &decoded)
+	if len(decoded.Torrents) != 1 || decoded.Torrents[0].Error != trErrorLocal || decoded.Torrents[0].ErrorString != want || decoded.Torrents[0].SeedIdleMode != transmissionLimitModeUnlimited {
+		t.Fatalf("local ownership failure was hidden or removable: %+v", decoded)
 	}
 }
