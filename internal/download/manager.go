@@ -34,7 +34,7 @@ type Manager struct {
 	coordinator           *TransferCoordinator // Coordinates transfer lifecycle
 	categories            *CategoryStore       // Maps transfer hash → category subfolder
 	transferFiles         *TransferFileStore   // Persists exact local files by transfer ID
-	removalMu             sync.RWMutex         // Serializes removal with transfer initialization/queueing
+	removalMu             sync.RWMutex         // Serializes removal with state publication and queue admission
 	activeFiles           sync.Map             // map[int64]int64 - tracks files being downloaded, FileID -> TransferID
 	downloadRetryAttempts sync.Map             // map[int64]int - bounded local retry rounds by FileID
 	downloadRetryDelay    func(int) (time.Duration, bool)
@@ -281,9 +281,34 @@ func (m *Manager) Stop() {
 // once the queue is full, and blocking there while holding m.mu would
 // deadlock against Stop.
 func (m *Manager) QueueDownload(job downloadJob) {
+	ctx, _ := m.coordinator.GetTransferContext(job.TransferID)
+	m.queueDownload(job, ctx)
+}
+
+func (m *Manager) queueDownload(job downloadJob, expected *TransferContext) {
+	if !m.claimDownload(job, expected) {
+		return
+	}
+	// The active claim survives a blocked send, retaining suppression until
+	// a worker sees and discards the job if removal happened in the meantime.
+	select {
+	case m.jobs <- job:
+	case <-m.stopChan:
+		m.activeFiles.Delete(job.FileID)
+	}
+}
+
+func (m *Manager) claimDownload(job downloadJob, expected *TransferContext) bool {
+	m.removalMu.RLock()
+	defer m.removalMu.RUnlock()
+	current, exists := m.coordinator.GetTransferContext(job.TransferID)
+	if !exists || expected == nil || current != expected {
+		m.downloadRetryAttempts.Delete(job.FileID)
+		return false
+	}
 	if m.RemovalPending(job.TransferID) {
 		m.downloadRetryAttempts.Delete(job.FileID)
-		return
+		return false
 	}
 	// Refuse new work once shutdown has begun. This is checked before claiming
 	// the file because the queue is buffered: after the workers exit, a send
@@ -291,23 +316,16 @@ func (m *Manager) QueueDownload(job downloadJob) {
 	// nothing left to run it.
 	select {
 	case <-m.stopChan:
-		return
+		return false
 	default:
 	}
 
 	// LoadOrStore makes "not already downloading" and claiming the file a
 	// single atomic step.
 	if _, alreadyActive := m.activeFiles.LoadOrStore(job.FileID, job.TransferID); alreadyActive {
-		return
+		return false
 	}
-
-	select {
-	case m.jobs <- job:
-		// Successfully queued
-	case <-m.stopChan:
-		// Manager is shutting down, just remove from active files
-		m.activeFiles.Delete(job.FileID)
-	}
+	return true
 }
 
 // cleanupTransfer handles the deletion of a completed transfer and its source files

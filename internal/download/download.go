@@ -257,16 +257,9 @@ func (m *Manager) scheduleDownloadRetry(job downloadJob, err error) bool {
 		case <-m.stopChan:
 			return
 		case <-timer.C:
-			m.removalMu.RLock()
 			// Removal can reclaim its disk marker before this timer fires.
-			// Only the same live context may enqueue another attempt.
-			current, exists := m.coordinator.GetTransferContext(job.TransferID)
-			if exists && current == transferCtx {
-				m.QueueDownload(job)
-			} else {
-				m.downloadRetryAttempts.Delete(job.FileID)
-			}
-			m.removalMu.RUnlock()
+			// Queue admission checks the same generation before claiming a file.
+			m.queueDownload(job, transferCtx)
 		}
 	}()
 

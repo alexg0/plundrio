@@ -425,10 +425,44 @@ func (p *TransferProcessor) startTransferProcessing(transfer *putio.Transfer) {
 
 // processTransfer handles downloading of a completed or seeding transfer
 func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
+	files, transferCtx := p.prepareTransfer(transfer)
+	if transferCtx == nil {
+		return
+	}
+	// Never hold removalMu across a channel send; a healthy file can occupy
+	// a worker for hours. Each job instead checks its generation at admission.
+	filesToDownload := p.queueTransferFiles(transfer, files, transferCtx)
+	if filesToDownload == 0 {
+		log.Info("transfers").Str("name", transfer.Name).Int64("transfer_id", transfer.ID).
+			Msg("All files already exist, completing transfer")
+		if err := p.manager.coordinator.CompleteTransfer(transfer.ID); err != nil {
+			log.Error("transfers").Int64("transfer_id", transfer.ID).Err(err).
+				Msg("Failed to complete transfer whose files already exist")
+		}
+	}
+}
+
+func (p *TransferProcessor) prepareTransfer(transfer *putio.Transfer) ([]*putio.File, *TransferContext) {
+	// Reserve a generation before network I/O. Removal can forget it even if
+	// its durable marker is reclaimed before the listing returns.
+	p.manager.removalMu.RLock()
+	if p.manager.RemovalPending(transfer.ID) {
+		p.manager.removalMu.RUnlock()
+		return nil, nil
+	}
+	reservation := p.manager.coordinator.InitiateTransfer(transfer.ID, transfer.Name, transfer.FileID, 0)
+	p.manager.removalMu.RUnlock()
+
+	var files []*putio.File
+	var listErr error
+	if transfer.FileID != 0 {
+		files, listErr = p.manager.client.GetAllTransferFiles(p.manager.Context(), transfer.FileID)
+	}
 	p.manager.removalMu.RLock()
 	defer p.manager.removalMu.RUnlock()
-	if p.manager.RemovalPending(transfer.ID) {
-		return
+	current, exists := p.manager.coordinator.GetTransferContext(transfer.ID)
+	if !exists || current != reservation || p.manager.RemovalPending(transfer.ID) {
+		return nil, nil
 	}
 	log.Debug("transfers").
 		Str("name", transfer.Name).
@@ -442,13 +476,14 @@ func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
 	// local completion but before the Transmission client removes the transfer.
 	if transfer.FileID == 0 {
 		p.restoreCleanedTransfer(transfer, true)
-		return
+		return nil, nil
 	}
 
-	files, err := p.manager.client.GetAllTransferFiles(p.manager.Context(), transfer.FileID)
-	if err != nil {
-		p.handleTransferError(transfer, err)
-		return
+	if listErr != nil {
+		// Preserve next-poll retries for ordinary transient listing errors.
+		p.manager.coordinator.RemoveTransfer(transfer.ID)
+		p.handleTransferError(transfer, listErr)
+		return nil, nil
 	}
 
 	if len(files) == 0 {
@@ -456,7 +491,7 @@ func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
 		// doing this the other way round silently did nothing and left the
 		// transfer to be re-examined on every poll forever.
 		if !p.initializeTransfer(transfer, 0) {
-			return
+			return nil, nil
 		}
 		if err := p.manager.coordinator.FailTransfer(transfer.ID, NewNoFilesFoundError(transfer.ID)); err != nil {
 			log.Error("transfers").
@@ -464,14 +499,14 @@ func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
 				Err(err).
 				Msg("Failed to mark transfer as failed")
 		}
-		return
+		return nil, nil
 	}
 
 	// Track before building or persisting the manifest so any validation or
 	// storage failure becomes an observable, bounded Failed transfer instead of
 	// being retried as unseen work on every poll.
 	if !p.initializeTransfer(transfer, len(files)) {
-		return
+		return nil, nil
 	}
 
 	manifest, err := buildTransferFileManifest(transfer, files)
@@ -481,7 +516,7 @@ func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
 			Err(err).
 			Msg("Failed to build transfer file manifest")
 		p.failInitializedTransfer(transfer.ID, err)
-		return
+		return nil, nil
 	}
 	if err := p.manager.transferFiles.Set(transfer.ID, manifest); err != nil {
 		log.Error("transfers").
@@ -489,26 +524,13 @@ func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
 			Err(err).
 			Msg("Failed to persist transfer file manifest")
 		p.failInitializedTransfer(transfer.ID, err)
-		return
+		return nil, nil
 	}
 
-	// Queue files that need downloading
-	filesToDownload := p.queueTransferFiles(transfer, files)
-
-	// If no files need downloading (all exist), complete the transfer
-	if filesToDownload == 0 {
-		log.Info("transfers").
-			Str("name", transfer.Name).
-			Int64("id", transfer.ID).
-			Msg("All files already exist, completing transfer")
-		if err := p.manager.coordinator.CompleteTransfer(transfer.ID); err != nil {
-			log.Error("transfers").
-				Int64("transfer_id", transfer.ID).
-				Err(err).
-				Msg("Failed to complete transfer whose files already exist")
-		}
-		return
-	}
+	// initializeTransfer replaces the reservation, preserving the immutable
+	// file count expected by concurrent RPC readers.
+	initialized, _ := p.manager.coordinator.GetTransferContext(transfer.ID)
+	return files, initialized
 }
 
 func (p *TransferProcessor) failInitializedTransfer(transferID int64, err error) {
@@ -650,17 +672,8 @@ func isPutioNotFound(err error) bool {
 }
 
 // queueTransferFiles processes files in a transfer and queues them for download
-func (p *TransferProcessor) queueTransferFiles(transfer *putio.Transfer, files []*putio.File) int {
+func (p *TransferProcessor) queueTransferFiles(transfer *putio.Transfer, files []*putio.File, ctx *TransferContext) int {
 	filesToDownload := 0
-
-	// Get the transfer context to update total size
-	ctx, exists := p.manager.coordinator.GetTransferContext(transfer.ID)
-	if !exists {
-		log.Error("transfers").
-			Int64("transfer_id", transfer.ID).
-			Msg("Transfer context not found when queueing files")
-		return 0
-	}
 
 	// Calculate total size of all files
 	var totalSize int64
@@ -680,7 +693,7 @@ func (p *TransferProcessor) queueTransferFiles(transfer *putio.Transfer, files [
 	for _, file := range files {
 		if p.shouldDownloadFile(transfer, file) {
 			filesToDownload++
-			p.queueFileDownload(transfer, file)
+			p.queueFileDownload(transfer, file, ctx)
 		} else {
 			// For files we don't need to download (already exist), mark as completed
 			if err := p.manager.coordinator.FileCompleted(transfer.ID); err != nil {
@@ -732,13 +745,13 @@ func (p *TransferProcessor) shouldDownloadFile(transfer *putio.Transfer, file *p
 }
 
 // queueFileDownload adds a file to the download queue
-func (p *TransferProcessor) queueFileDownload(transfer *putio.Transfer, file *putio.File) {
+func (p *TransferProcessor) queueFileDownload(transfer *putio.Transfer, file *putio.File, ctx *TransferContext) {
 	category := p.manager.localCategory(transfer.ID)
-	p.manager.QueueDownload(downloadJob{
+	p.manager.queueDownload(downloadJob{
 		FileID:     file.ID,
 		Name:       filepath.Join(category, transfer.Name, file.Name),
 		TransferID: transfer.ID,
-	})
+	}, ctx)
 	log.Debug("transfers").
 		Str("file_name", file.Name).
 		Int64("file_id", file.ID).
