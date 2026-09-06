@@ -119,6 +119,9 @@ func (s *Service) snapshot(ctx context.Context, selected *Object) (Report, error
 		return Report{}, err
 	}
 
+	if err := fingerprintUnmanaged(ctx, localRoot, localTree, localActive); err != nil {
+		return Report{}, fmt.Errorf("fingerprint unmanaged local objects: %w", err)
+	}
 	active, unmanaged := classifyRemote(remoteTree, remoteActive, remoteActiveParents)
 	localManaged, localUnmanaged := classifyLocal(localTree, localActive)
 	active = append(active, localManaged...)
