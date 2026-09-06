@@ -345,8 +345,12 @@ plundrio reconcile report \
 
 The command emits stable JSON with separate `active` and `unmanaged` arrays.
 Put.io objects use IDs such as `putio:12345`; local objects use deterministic
-IDs derived from their root-relative paths and current filesystem identity.
-Changing or replacing local content invalidates its prior ID. Nested roots are
+IDs derived from their root-relative paths, current filesystem identity, and
+SHA-256 content fingerprints. Unmanaged regular files are read in full, so
+reporting large unmanaged trees adds disk I/O; active payloads are not read.
+Different content invalidates its prior ID even when a filesystem reuses the
+same inode and timestamps. Regenerate reports made by older metadata-only
+versions before selecting local IDs. Nested roots are
 reduced to the smallest non-overlapping objects: active descendants and their
 unmanaged siblings are reported separately, while a wholly unmanaged directory
 is one object whose size includes its contents. The command never creates a
@@ -391,8 +395,10 @@ roots are intended. Plundrio inventories the roots once per batch, then refreshe
 each selected branch and current transfer ownership before its applied deletion.
 It refuses IDs that are active, missing, or no longer unmanaged. Unrelated remote
 and local subtrees are not crawled again. Local removal rechecks the selected
-tree's identity through Go's root-confined filesystem API and rejects symlink
-objects and parents. Local deletion requires Unix filesystem identity and fails
+tree's identity and contents through Go's root-confined filesystem API and rejects symlink
+objects, parents, and special files. Each selected local tree is reread during
+revalidation; ownership is checked again after the final content read. Local
+deletion requires Unix filesystem identity and fails
 closed on other platforms; read-only reports, dry runs, and Put.io deletion remain
 available. No filesystem/API transaction can exclude a concurrent writer after
 the final check; stop writers while applying a reviewed batch.

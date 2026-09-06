@@ -58,7 +58,7 @@ func TestReconcileReservesInternalState(t *testing.T) {
 				t.Fatalf("reserved objects exposed: %+v", report.Unmanaged)
 			}
 			for _, path := range []string{name, name + "/1.json", download.CategoryStateFileName} {
-				if err := deleteLocalObject(root, Object{Path: path}); err == nil || !strings.Contains(err.Error(), "reserved") {
+				if err := deleteLocalObject(context.Background(), root, Object{Path: path}, nil); err == nil || !strings.Contains(err.Error(), "reserved") {
 					t.Fatalf("reserved delete %q = %v", path, err)
 				}
 			}
@@ -152,7 +152,7 @@ func TestDeleteDirectlyRejectsSymlinkParent(t *testing.T) {
 	if err := os.Symlink("real", filepath.Join(root, "alias")); err != nil {
 		t.Fatal(err)
 	}
-	if err := deleteLocalObject(root, Object{Path: "alias/keep"}); err == nil || !strings.Contains(err.Error(), "symlink parent") {
+	if err := deleteLocalObject(context.Background(), root, Object{Path: "alias/keep"}, nil); err == nil || !strings.Contains(err.Error(), "symlink parent") {
 		t.Fatalf("symlink parent was not refused: %v", err)
 	}
 }
@@ -181,7 +181,9 @@ func TestDeleteLocalBatchLeavesUnselectedTreesUnwalked(t *testing.T) {
 		}
 	}
 	client.onTransfers = func(call int) {
-		if call == 2 {
+		// Preview and the batch inventory must finish their content reads.
+		// Revoke access during the first selected-branch refresh instead.
+		if call == 3 {
 			if err := os.Chmod(unrelated, 0); err != nil {
 				t.Fatal(err)
 			}

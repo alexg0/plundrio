@@ -415,7 +415,7 @@ func TestDeleteRejectsTraversalAndSymlinkEscape(t *testing.T) {
 	outside := t.TempDir()
 	mustWrite(t, filepath.Join(outside, "keep"), "safe")
 
-	if err := deleteLocalObject(root, Object{Source: "local", Path: "../outside"}); err == nil {
+	if err := deleteLocalObject(context.Background(), root, Object{Source: "local", Path: "../outside"}, nil); err == nil {
 		t.Fatal("expected traversal path to be rejected")
 	}
 	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {

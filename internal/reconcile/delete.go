@@ -201,7 +201,29 @@ func (s *Service) deleteOne(ctx context.Context, id string, options DeleteOption
 			return resultForObject(object, "failed", "delete_failed", err)
 		}
 	case "local":
-		if err := deleteLocalObject(s.localRoot, object); err != nil {
+		if err := deleteLocalObject(ctx, s.localRoot, object, func(node *localNode) error {
+			// Content checks may be slow. Refresh ownership after the final read,
+			// including pending removals, before any filesystem mutation.
+			remote, err := s.remoteTree(ctx, &object)
+			if err != nil {
+				return err
+			}
+			transfers, err := s.client.GetTransfers(ctx)
+			if err != nil {
+				return err
+			}
+			transfers = transfersInRoot(transfers, s.putioFolderID, remote, s.useCategoriesPutio)
+			active, err := activeLocalPaths(s.localRoot, transfers, []*localNode{node})
+			if err != nil {
+				return err
+			}
+			for path := range active {
+				if includesBranch(&object, "local", filepath.ToSlash(path)) {
+					return fmt.Errorf("local object became active during content validation")
+				}
+			}
+			return ctx.Err()
+		}); err != nil {
 			return resultForObject(object, "failed", "delete_failed", err)
 		}
 	default:
@@ -242,7 +264,7 @@ func resultForObject(object Object, status, reason string, err error) DeleteResu
 	return result
 }
 
-func deleteLocalObject(rootPath string, object Object) error {
+func deleteLocalObject(ctx context.Context, rootPath string, object Object, validateOwnership func(*localNode) error) error {
 	rel, err := confinedRelativePath(rootPath, object.Path)
 	if err != nil {
 		return err
@@ -274,12 +296,20 @@ func deleteLocalObject(rootPath string, object Object) error {
 			return fmt.Errorf("refusing symlink parent %q", parent)
 		}
 	}
-	current, err := confinedLocalNode(root.FS(), filepath.ToSlash(rel))
+	current, err := confinedLocalNode(ctx, localContentFS(root), filepath.ToSlash(rel))
 	if err != nil {
 		return fmt.Errorf("revalidate local identity: %w", err)
 	}
 	if current.object.ID != object.ID {
 		return fmt.Errorf("local object changed since selection")
+	}
+	if validateOwnership != nil {
+		if err := validateOwnership(current); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := root.RemoveAll(rel); err != nil {
 		return fmt.Errorf("remove local object: %w", err)
@@ -290,13 +320,19 @@ func deleteLocalObject(rootPath string, object Object) error {
 // Recompute the selected tree through the opened root immediately before
 // removal. Missing platform identity is an explicit mutation refusal, never a
 // weaker path/size/mtime-only delete decision.
-func confinedLocalNode(root fs.FS, rel string) (*localNode, error) {
+func confinedLocalNode(ctx context.Context, root fs.FS, rel string) (*localNode, error) {
 	info, err := fs.Lstat(root, rel)
 	if err != nil {
 		return nil, err
 	}
 	if systemIdentity(info) == "" {
 		return nil, fmt.Errorf("local deletion requires Unix filesystem identity")
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refusing symlink %q", rel)
+	}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("refusing special file %q", rel)
 	}
 	node := &localNode{relPath: filepath.FromSlash(rel), info: info}
 	if info.IsDir() {
@@ -305,13 +341,16 @@ func confinedLocalNode(root fs.FS, rel string) (*localNode, error) {
 			return nil, err
 		}
 		for _, entry := range entries {
-			child, err := confinedLocalNode(root, rel+"/"+entry.Name())
+			child, err := confinedLocalNode(ctx, root, rel+"/"+entry.Name())
 			if err != nil {
 				return nil, err
 			}
 			node.children = append(node.children, child)
 		}
 	}
-	node.object.ID = localID(node.relPath, info, node.children)
+	node.object.ID, err = contentLocalID(ctx, root, node)
+	if err != nil {
+		return nil, err
+	}
 	return node, nil
 }
