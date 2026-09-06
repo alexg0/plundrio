@@ -10,10 +10,12 @@ import (
 type transferProgress struct {
 	downloaded   int64
 	lastProgress time.Time
+	downloading  bool
 }
 
 // stallTracker detects Put.io transfers whose downloaded byte count remains
-// unchanged while their status is DOWNLOADING. Its state is intentionally
+// unchanged while their status is DOWNLOADING. COMPLETING preserves the byte
+// baseline but does not report an error until DOWNLOADING resumes. Its state is intentionally
 // in-memory so a restart always establishes a fresh observation baseline. It
 // is owned by the monitor goroutine; RPC only sees annotated snapshots.
 type stallTracker struct {
@@ -38,18 +40,20 @@ func (s *stallTracker) Observe(transfers []*putio.Transfer) {
 	now := s.now()
 	active := make(map[int64]struct{}, len(transfers))
 	for _, transfer := range transfers {
-		if transfer.Status != "DOWNLOADING" {
+		if transfer.Status != "DOWNLOADING" && transfer.Status != "COMPLETING" {
 			continue
 		}
 
 		active[transfer.ID] = struct{}{}
 		progress, exists := s.progress[transfer.ID]
 		if !exists || progress.downloaded != transfer.Downloaded {
-			s.progress[transfer.ID] = transferProgress{
+			progress = transferProgress{
 				downloaded:   transfer.Downloaded,
 				lastProgress: now,
 			}
 		}
+		progress.downloading = transfer.Status == "DOWNLOADING"
+		s.progress[transfer.ID] = progress
 	}
 
 	for transferID := range s.progress {
@@ -60,7 +64,7 @@ func (s *stallTracker) Observe(transfers []*putio.Transfer) {
 }
 
 func (s *stallTracker) Error(transferID int64) string {
-	if progress, exists := s.progress[transferID]; exists && s.now().Sub(progress.lastProgress) >= s.timeout {
+	if progress, exists := s.progress[transferID]; exists && progress.downloading && s.now().Sub(progress.lastProgress) >= s.timeout {
 		return fmt.Sprintf(
 			"Put.io transfer stalled: no byte progress for %s; inspect the transfer in Put.io",
 			s.timeout,

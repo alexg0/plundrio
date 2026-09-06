@@ -47,6 +47,33 @@ func TestStallTrackerProgressTimeoutAndRecovery(t *testing.T) {
 	}
 }
 
+func TestStallTrackerPreservesBaselineAcrossCompleting(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	tracker := newStallTracker(time.Hour, clock.Now)
+	transfer := &putio.Transfer{ID: 42, Status: "DOWNLOADING", Downloaded: 100}
+	tracker.Observe([]*putio.Transfer{transfer})
+	clock.Advance(50 * time.Minute)
+	transfer.Status = "COMPLETING"
+	tracker.Observe([]*putio.Transfer{transfer})
+	clock.Advance(20 * time.Minute)
+	if got := tracker.Error(42); got != "" {
+		t.Fatalf("COMPLETING transfer reported as stalled: %q", got)
+	}
+	transfer.Status = "DOWNLOADING"
+	tracker.Observe([]*putio.Transfer{transfer})
+	if tracker.Error(42) == "" {
+		t.Fatal("transient COMPLETING status reset the no-progress baseline")
+	}
+	transfer.Status = "COMPLETING"
+	transfer.Downloaded++
+	tracker.Observe([]*putio.Transfer{transfer})
+	transfer.Status = "DOWNLOADING"
+	tracker.Observe([]*putio.Transfer{transfer})
+	if tracker.Error(42) != "" {
+		t.Fatal("byte progress during COMPLETING did not reset baseline")
+	}
+}
+
 func TestStallTrackerRestartEstablishesFreshBaseline(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)}
 	transfer := &putio.Transfer{ID: 42, Status: "DOWNLOADING", Downloaded: 100}

@@ -77,7 +77,7 @@ var runCmd = &cobra.Command{
 		// PLDR_USE_CATEGORIES_* env vars, and config-file keys all resolve.
 		useCategoriesTarget := viper.GetBool("use-categories-target")
 		useCategoriesPutio := viper.GetBool("use-categories-putio")
-		stalledTransferTimeout := configuredStalledTransferTimeout()
+		stalledTransferTimeout := viper.GetDuration(stalledTransferTimeoutKey)
 		downloadStartWindow := config.DownloadStartWindowConfig{
 			Enabled: viper.GetBool("download_start_window.enabled"),
 			Start:   viper.GetString("download_start_window.start"),
@@ -337,10 +337,6 @@ func init() {
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(getTokenCmd)
 	rootCmd.AddCommand(generateConfigCmd)
-}
-
-func configuredStalledTransferTimeout() time.Duration {
-	return viper.GetDuration(stalledTransferTimeoutKey)
 }
 
 func main() {

@@ -252,7 +252,9 @@ download_start_window:         # Optional local download start window
 log_level: "info"              # Log level (trace,debug,info,warn,error,fatal,panic,none,pretty)
 ```
 
-`stalled-transfer-timeout` tracks the downloaded byte count of each Put.io transfer while its status is `DOWNLOADING`. The conservative default is `6h`; set it to `0` to disable detection. A stalled transfer is only reported through Transmission's `error` and `errorString` fields—plundrio does not stop, retry, or delete it. Detection restarts with a fresh observation window whenever plundrio restarts.
+`stalled-transfer-timeout` tracks the downloaded byte count of each Put.io transfer. The default is `6h`; set it to `0` to disable detection. Unchanged bytes in `DOWNLOADING` produce Transmission error `3` (`TR_STAT_LOCAL_ERROR`). This deliberately lets Sonarr/Radarr treat the transfer as a failed download: depending on their failed-download handling settings, they may blocklist the release, grab a replacement, and request `torrent-remove`, which deletes the original remote transfer and may delete local data. Plundrio's stall detector itself only reports the error. Completed-transfer removal through the seed-policy fields is separately limited to locally processed transfers.
+
+A temporary move to `COMPLETING` preserves the no-progress baseline, but stall errors are reported only in `DOWNLOADING`. Any change in the byte count resets the baseline, including during `COMPLETING`; completion, other inactive states, and disappearance from the monitored list discard it. Restarting plundrio establishes a fresh observation window. Detection may occur up to one polling interval after the timeout.
 
 `download_start_window` only gates when plundrio may begin a new local download. It does not stop Put.io transfers from being created, and it does not interrupt downloads that are already in progress.
 

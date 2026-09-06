@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -8,21 +10,22 @@ import (
 )
 
 func TestStalledTransferTimeoutFlagWiring(t *testing.T) {
-	viper.Reset()
-	t.Cleanup(viper.Reset)
+	// CLI initialization owns package globals. Keep mutations in a separate
+	// process so this test can run alongside parallel tests safely.
+	if os.Getenv("PLUNDRIO_TEST_STALL_FLAG") != "1" {
+		t.Parallel()
+		cmd := exec.Command(os.Args[0], "-test.run=^TestStalledTransferTimeoutFlagWiring$")
+		cmd.Env = append(os.Environ(), "PLUNDRIO_TEST_STALL_FLAG=1")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("flag wiring subprocess: %v\n%s", err, output)
+		}
+		return
+	}
 
 	flag := runCmd.Flags().Lookup("stalled-transfer-timeout")
 	if flag == nil {
 		t.Fatal("stalled-transfer-timeout flag is not registered")
 	}
-
-	originalValue, originalChanged := flag.Value.String(), flag.Changed
-	t.Cleanup(func() {
-		if err := flag.Value.Set(originalValue); err != nil {
-			t.Errorf("restore stalled-transfer-timeout flag: %v", err)
-		}
-		flag.Changed = originalChanged
-	})
 
 	if got, want := flag.DefValue, defaultStalledTransferTimeout.String(); got != want {
 		t.Fatalf("default = %q, want %q", got, want)
@@ -34,7 +37,7 @@ func TestStalledTransferTimeoutFlagWiring(t *testing.T) {
 		t.Fatalf("bind run command flags: %v", err)
 	}
 
-	if got, want := configuredStalledTransferTimeout(), 30*time.Minute; got != want {
+	if got, want := viper.GetDuration(stalledTransferTimeoutKey), 30*time.Minute; got != want {
 		t.Errorf("configured timeout = %s, want %s", got, want)
 	}
 }
