@@ -59,7 +59,7 @@ put.io essentially performs the same download process.
 
 - 🔄 Seamless integration with Sonarr, Radarr, and other *arr applications
   supporting Transmission RPC
-- 🌐 Minimal local state; multiple instances per put.io account supported, one per download directory
+- 🌐 Stateless architecture; multiple instances per put.io account supported
 - ⚡ Fast and efficient downloads from put.io (with resume support)
 - 🔄 Parallel downloads with configurable worker count to maximize bandwidth
 - 🧹 Automatic cleanup of completed transfers
@@ -380,10 +380,7 @@ Yes, plundrio will monitor and download any transfers in your configured put.io 
 plundrio focuses on automation and integration with *arr applications, while the official client offers a more general-purpose interface.
 
 **Can I run multiple instances of plundrio?**<br/>
-Yes, as long as each instance uses its own `--target` directory. plundrio keeps a small
-amount of state there: `.plundrio-state.json` holds the put.io transfer ID → category
-mapping used by `use-categories-target`. Instances sharing a download directory will
-overwrite each other's copy of it.
+Yes, plundrio is stateless and can be run in multiple instances, even pointing to the same put.io account with different configurations.
 
 **Does plundrio support VPNs or proxies?**<br/>
 plundrio uses your system's network configuration. If your system routes through a VPN or proxy, plundrio will use that connection.
@@ -392,6 +389,21 @@ plundrio uses your system's network configuration. If your system routes through
 plundrio logs its activities to stdout. You can redirect these logs to a file or use a log management system.
 
 ## 🤝 Contributing
+
+### Transmission restart and file metadata
+
+After restart, a Put.io `COMPLETED` or `SEEDING` transfer initially reports
+50% / downloading until Plundrio restores or verifies its local completion.
+This changes the status existing *arr clients see on restart and prevents
+premature import or removal while the local copy is still pending. Legacy
+records already cleaned by older versions remain recoverable without an
+invented file list.
+
+`.plundrio-files/` is reserved for transfer ownership manifests in the download
+root. Preserve it across restarts and exclude it from media scans, filesystem
+reconciliation, and unmanaged-file deletion. Transmission `files` names are
+relative to `downloadDir`; `bytesCompleted` currently reports whole-transfer
+completion (zero until complete, then each file's full length).
 
 Contributions to plundrio are welcome! Here's how you can contribute:
 
