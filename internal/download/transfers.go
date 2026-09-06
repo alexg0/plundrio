@@ -551,8 +551,12 @@ func buildTransferFileManifest(transfer *putio.Transfer, files []*putio.File) ([
 }
 
 func (p *TransferProcessor) restoreCleanedTransfer(transfer *putio.Transfer, allowLegacy bool) {
-	files, ok := p.manager.transferFiles.Get(transfer.ID)
-	if !ok {
+	files, err := p.manager.transferFiles.load(transfer.ID)
+	if err != nil {
+		p.failCleanedTransfer(transfer, err)
+		return
+	}
+	if len(files) == 0 {
 		if !allowLegacy {
 			p.failCleanedTransfer(transfer, errors.New("source file is gone and no authoritative file manifest exists"))
 			return

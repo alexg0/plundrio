@@ -60,19 +60,32 @@ func (fs *TransferFileStore) Set(transferID int64, files []TransferFile) error {
 }
 
 func (fs *TransferFileStore) Get(transferID int64) ([]TransferFile, bool) {
-	data, err := os.ReadFile(fs.path(transferID))
+	files, err := fs.load(transferID)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Error("files").Err(err).Msg("Failed to load transfer file state")
-		}
-		return nil, false
-	}
-	var files []TransferFile
-	if err := json.Unmarshal(data, &files); err != nil {
-		log.Error("files").Err(err).Msg("Failed to parse transfer file state")
+		log.Error("files").Err(err).Msg("Failed to load transfer file state")
 		return nil, false
 	}
 	return files, len(files) > 0
+}
+
+// load returns nil only for genuinely absent legacy state. Existing but
+// unreadable, malformed, or empty manifests must not authorize legacy completion.
+func (fs *TransferFileStore) load(transferID int64) ([]TransferFile, error) {
+	data, err := os.ReadFile(fs.path(transferID))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read transfer file state: %w", err)
+	}
+	var files []TransferFile
+	if err := json.Unmarshal(data, &files); err != nil {
+		return nil, fmt.Errorf("parse transfer file state: %w", err)
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("transfer file manifest is empty")
+	}
+	return files, nil
 }
 
 // Remove deletes a transfer's manifest after the Transmission client removes it.

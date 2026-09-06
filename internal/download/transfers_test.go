@@ -205,6 +205,34 @@ func TestProcessTransferRestoresLegacyCleanedTransferWithoutManifest(t *testing.
 	}
 }
 
+func TestProcessTransferRejectsInvalidExistingManifestAsLegacy(t *testing.T) {
+	for _, contents := range []string{"corrupt", "[]", "null", "directory"} {
+		t.Run(contents, func(t *testing.T) {
+			client := &fakePutioClient{}
+			p := newTestProcessor(t, 100, false, client)
+			path := p.manager.transferFiles.path(101)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if contents == "directory" {
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+				t.Fatal(err)
+			}
+			p.processTransfer(&putio.Transfer{ID: 101, Name: "Book", FileID: 0})
+			ctx, ok := p.manager.GetTransferContext(101)
+			if !ok || ctx.GetState() != TransferLifecycleFailed || ctx.GetError() == nil {
+				t.Fatalf("invalid existing manifest restored as legacy completion: context=%v exists=%v", ctx, ok)
+			}
+			if client.getAllTransferFilesCalls != 0 {
+				t.Fatal("invalid manifest caused Put.io root lookup")
+			}
+		})
+	}
+}
+
 func TestProcessTransferRestoresCleanedTransferFromManifest(t *testing.T) {
 	client := &fakePutioClient{}
 	p := newTestProcessor(t, 100, false, client)
