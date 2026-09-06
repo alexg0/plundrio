@@ -94,7 +94,12 @@ func PendingRemovalPaths(targetDir string) ([]string, error) {
 			}
 			// Protect the whole transfer directory, including incomplete files
 			// that a still-draining worker has not renamed to their final name.
-			paths = append(paths, filepath.Join(category, transferRoot))
+			paths = append(paths, transferRoot)
+			if category != "" {
+				// Category configuration may have changed since this was stored.
+				// Retain both layouts, as ordinary active-transfer protection does.
+				paths = append(paths, filepath.Join(category, transferRoot))
+			}
 		}
 	}
 	return paths, nil

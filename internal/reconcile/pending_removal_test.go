@@ -34,6 +34,22 @@ func TestReconcileProtectsPendingRemovalWithoutManagedTransfer(t *testing.T) {
 	}
 }
 
+func TestReconcileProtectsFlatPendingRemovalWithStaleCategory(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "Show"))
+	mustWrite(t, filepath.Join(root, "Show", "partial.tmp"), "partial")
+	mustMkdir(t, filepath.Join(root, ".plundrio-files"))
+	mustWrite(t, filepath.Join(root, ".plundrio-files", "10.removing.json"), `"tv"`)
+	mustWrite(t, filepath.Join(root, ".plundrio-files", "10.json"), `[{"name":"Show/episode.mkv","length":7}]`)
+	report, err := New(&fakeClient{}, 1, root, false).Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Unmanaged) != 0 || !reflect.DeepEqual(objectLabels(report.Active), []string{"local:Show"}) {
+		t.Fatalf("flat pending removal exposed to deletion: %+v", report)
+	}
+}
+
 func TestReconcilePendingRemovalFailsClosedWithoutOwnership(t *testing.T) {
 	for _, manifest := range []string{"", "invalid", `[{"name":"../outside","length":1}]`} {
 		t.Run(manifest, func(t *testing.T) {
