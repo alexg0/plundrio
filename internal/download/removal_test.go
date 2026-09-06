@@ -166,3 +166,16 @@ func TestUnreadableRemovalStateFailsClosed(t *testing.T) {
 		t.Fatal("corrupt ownership state allowed destructive retry")
 	}
 }
+
+func TestNullRemovalCategoryFailsClosed(t *testing.T) {
+	m := newManagerForTest(t, &fakeClient{})
+	if _, err := m.PrepareRemoval(101); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.removalPath(101), []byte("null"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.PrepareRemoval(101); err == nil {
+		t.Fatal("null ownership category allowed destructive retry")
+	}
+}

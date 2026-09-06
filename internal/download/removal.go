@@ -35,10 +35,14 @@ func (m *Manager) removalCategory(id int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var category string
-	if err := json.Unmarshal(data, &category); err != nil {
+	var storedCategory *string
+	if err := json.Unmarshal(data, &storedCategory); err != nil {
 		return "", fmt.Errorf("read removal category: %w", err)
 	}
+	if storedCategory == nil {
+		return "", fmt.Errorf("removal category must be a JSON string")
+	}
+	category := *storedCategory
 	if category != "" && (!filepath.IsLocal(category) || filepath.Clean(category) != category) {
 		return "", fmt.Errorf("invalid removal category %q", category)
 	}
