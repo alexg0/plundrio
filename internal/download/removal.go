@@ -49,9 +49,9 @@ func (m *Manager) removalCategory(id int64) (string, error) {
 	return category, nil
 }
 
-// PrepareRemoval durably suppresses new processing before remote deletion. The
-// processor lock lets an already-running queue pass finish before we forget it;
-// queued jobs and retry attempts check the marker before starting another file.
+// PrepareRemoval durably suppresses new processing before remote deletion.
+// The lock serializes context publication and queue admission, never network
+// calls or blocked sends. Claimed jobs retain suppression until workers drain.
 // The returned category is captured under the same lock as marker reclamation.
 func (m *Manager) PrepareRemoval(id int64) (string, error) {
 	m.removalMu.Lock()
