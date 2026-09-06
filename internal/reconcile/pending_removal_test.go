@@ -65,3 +65,13 @@ func TestReconcilePendingRemovalFailsClosedWithoutOwnership(t *testing.T) {
 		})
 	}
 }
+
+func TestReconcileRejectsNullPendingRemovalCategory(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, ".plundrio-files"))
+	mustWrite(t, filepath.Join(root, ".plundrio-files", "10.removing.json"), "null")
+	mustWrite(t, filepath.Join(root, ".plundrio-files", "10.json"), `[{"name":"Show/episode.mkv","length":7}]`)
+	if _, err := New(&fakeClient{}, 1, root, true).Reconcile(context.Background()); err == nil {
+		t.Fatal("null pending category allowed reconciliation")
+	}
+}
