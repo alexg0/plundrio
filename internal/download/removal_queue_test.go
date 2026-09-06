@@ -11,9 +11,13 @@ import (
 	"github.com/elsbrock/go-putio"
 )
 
+// These tests check lock independence, not filesystem latency. Removal writes
+// durable markers, so allow slow storage while still catching deadlocks.
+const removalWatchdog = 10 * time.Second
+
 func awaitRemovalCondition(t *testing.T, condition func() bool, message string) {
 	t.Helper()
-	deadline := time.NewTimer(time.Second)
+	deadline := time.NewTimer(removalWatchdog)
 	defer deadline.Stop()
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()
@@ -53,13 +57,17 @@ func TestRemovalDoesNotWaitForFullQueue(t *testing.T) {
 					}
 					go func() { m.workerWg.Wait(); close(senderDone) }()
 				}
-				removalDone := make(chan error, 1)
+				var removalDone chan struct{}
+				var removalErr error
 				var workerDone chan struct{}
 				t.Cleanup(func() {
 					close(m.stopChan)
 					<-senderDone
 					if workerDone != nil {
 						<-workerDone
+					}
+					if removalDone != nil {
+						<-removalDone
 					}
 				})
 				awaitRemovalCondition(t, func() bool { return m.activeFileCount(101) == 1 }, "sender never claimed its blocked file")
@@ -68,13 +76,17 @@ func TestRemovalDoesNotWaitForFullQueue(t *testing.T) {
 					t.Fatal("sender was not blocked on the full queue")
 				default:
 				}
-				go func() { _, err := m.PrepareRemoval(removedID); removalDone <- err }()
+				removalDone = make(chan struct{})
+				go func() {
+					defer close(removalDone)
+					_, removalErr = m.PrepareRemoval(removedID)
+				}()
 				select {
-				case err := <-removalDone:
-					if err != nil {
-						t.Fatal(err)
+				case <-removalDone:
+					if removalErr != nil {
+						t.Fatal(removalErr)
 					}
-				case <-time.After(300 * time.Millisecond):
+				case <-time.After(removalWatchdog):
 					t.Fatal("removal waited for a full queue to drain")
 				}
 				// Remove the sender as well, then let its claimed job enter the
@@ -181,16 +193,27 @@ func TestRemovalInvalidatesBlockedRemoteListing(t *testing.T) {
 		m.processor.processTransfer(&putio.Transfer{ID: 101, Name: "Book", FileID: 500})
 	}()
 	releaseListing := sync.OnceFunc(func() { close(release) })
-	t.Cleanup(func() { releaseListing(); <-done })
-	<-listing
-	removed := make(chan error, 1)
-	go func() { _, err := m.PrepareRemoval(101); removed <- err }()
-	select {
-	case err := <-removed:
-		if err != nil {
-			t.Fatal(err)
+	var removalDone chan struct{}
+	var removalErr error
+	t.Cleanup(func() {
+		releaseListing()
+		<-done
+		if removalDone != nil {
+			<-removalDone
 		}
-	case <-time.After(300 * time.Millisecond):
+	})
+	<-listing
+	removalDone = make(chan struct{})
+	go func() {
+		defer close(removalDone)
+		_, removalErr = m.PrepareRemoval(101)
+	}()
+	select {
+	case <-removalDone:
+		if removalErr != nil {
+			t.Fatal(removalErr)
+		}
+	case <-time.After(removalWatchdog):
 		t.Fatal("removal waited for a remote listing")
 	}
 	m.pruneRemovals(m.pendingRemovals(), nil)
