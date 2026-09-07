@@ -36,7 +36,8 @@ const (
 	TransferLifecycleCompleted
 	TransferLifecycleFailed
 	TransferLifecycleCancelled
-	TransferLifecycleProcessed // Transfer has been processed locally and can be shown as 100% complete
+	TransferLifecycleProcessed   // Transfer has been processed locally and can be shown as 100% complete
+	TransferLifecycleNeedsReview // Source unavailable without local completion evidence; operator resolution required
 )
 
 // String returns a string representation of the transfer state
@@ -54,6 +55,8 @@ func (s TransferLifecycleState) String() string {
 		return "Cancelled"
 	case TransferLifecycleProcessed:
 		return "Processed"
+	case TransferLifecycleNeedsReview:
+		return "NeedsReview"
 	default:
 		return "Unknown"
 	}
