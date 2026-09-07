@@ -44,6 +44,10 @@ type progressResult struct {
 // tracked by the download manager. Otherwise we rely solely on the Put.io
 // transfer metadata.
 func calculateProgress(in progressInput) progressResult {
+	if in.TransferCtx != nil && in.TransferCtx.GetState() == download.TransferLifecycleNeedsReview {
+		// Unknown size still needs a positive sentinel: zero signals done.
+		return progressResult{PercentDone: 0.5, Status: trStatusStopped, LeftUntilDone: max(int64(in.PutioSize), 1)}
+	}
 	if in.TransferCtx != nil {
 		// Restored transfers have no live file count, but their processed state
 		// is still authoritative after a restart.
