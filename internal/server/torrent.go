@@ -433,6 +433,12 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 			torrentInfo["error"] = trErrorLocal
 			torrentInfo["errorString"] = "remote deletion pending; retry torrent-remove or remove the transfer on Put.io"
 		}
+		if s.dlService.NeedsReview(t.ID) || (transferCtx != nil && transferCtx.GetState() == download.TransferLifecycleNeedsReview) {
+			applyReviewStatus(torrentInfo, t.Size, slices.Contains(params.Fields, "files"))
+			if s.dlService.RemovalPending(t.ID) {
+				torrentInfo["errorString"] = "Reviewed record retirement pending; retry the explicit reviewed-retirement request. Local files remain unverified and untouched."
+			}
+		}
 
 		torrents = append(torrents, torrentInfo)
 
@@ -518,10 +524,18 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 	var params struct {
 		IDs             torrentIDs `json:"ids"`
 		DeleteLocalData bool       `json:"delete-local-data"`
+		RetireReviewed  bool       `json:"plundrio-retire-reviewed"`
+		CopyVerified    bool       `json:"plundrio-copy-verified"`
 	}
 
 	if err := json.Unmarshal(args, &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if params.RetireReviewed || params.CopyVerified {
+		if !params.RetireReviewed || !params.CopyVerified || params.DeleteLocalData || len(params.IDs) != 1 || !params.IDs[0].numeric || params.IDs[0].id <= 0 {
+			return nil, fmt.Errorf("review retirement requires one exact positive numeric ID, delete-local-data=false, plundrio-retire-reviewed=true and plundrio-copy-verified=true")
+		}
+		return s.retireReviewedTransfer(ctx, params.IDs[0])
 	}
 
 	for _, id := range params.IDs {
@@ -537,7 +551,10 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 
 		// Capture the deletion destination before remote mutation: the monitor
 		// may reclaim the durable category as soon as remote absence is visible.
-		category, err := s.dlService.PrepareRemoval(transfer.ID)
+		// Ready remote records must be classified before cancellation; the
+		// manager checks this under the same lock as retry generation changes.
+		ready := transfer.Status == "COMPLETED" || transfer.Status == "SEEDING"
+		category, err := s.dlService.PrepareRemoval(transfer.ID, ready)
 		if err != nil {
 			return nil, fmt.Errorf("preserve removal state for transfer %d: %w", transfer.ID, err)
 		}

@@ -111,7 +111,7 @@ func (s *torrentAddDownloadService) GetCategory(transferID int64) string {
 	return s.categories[transferID]
 }
 
-func (s *torrentAddDownloadService) PrepareRemoval(id int64) (string, error) {
+func (s *torrentAddDownloadService) PrepareRemoval(id int64, _ bool) (string, error) {
 	if s.pending == nil {
 		s.pending = make(map[int64]string)
 	}
@@ -123,6 +123,11 @@ func (s *torrentAddDownloadService) PrepareRemoval(id int64) (string, error) {
 func (s *torrentAddDownloadService) RemovalPending(id int64) bool {
 	_, ok := s.pending[id]
 	return ok
+}
+
+func (s *torrentAddDownloadService) NeedsReview(int64) bool { return false }
+func (s *torrentAddDownloadService) PrepareReviewRetirement(context.Context, *putio.Transfer) (string, error) {
+	return "", fmt.Errorf("not a reviewed record")
 }
 
 func (s *torrentAddDownloadService) RemoveCategory(transferID int64) {

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/elsbrock/go-putio"
+	"github.com/elsbrock/plundrio/internal/api"
 	"github.com/elsbrock/plundrio/internal/config"
 )
 
@@ -33,19 +34,19 @@ func TestIsPutioNotFoundUnwrapsClientErrors(t *testing.T) {
 	}
 }
 
-func TestHandleTransferErrorFailsSafelyForWrappedNotFoundWithoutManifest(t *testing.T) {
-	manager := newTestManager()
+func TestHandleTransferErrorHoldsWrappedRootNotFoundWithoutManifest(t *testing.T) {
+	manager := newTestProcessor(t, 42, false, &fakePutioClient{}).manager
 	transfer := &putio.Transfer{ID: 1, Name: "Example", FileID: 2}
-	err := fmt.Errorf("get transfer files: %w", &putio.ErrorResponse{Type: "NotFound"})
+	err := fmt.Errorf("get transfer files: %w", &api.TransferSourceNotFoundError{FileID: 2, Err: &putio.ErrorResponse{Type: "NotFound"}})
 
 	manager.processor.handleTransferError(transfer, err)
 
 	transferContext, ok := manager.coordinator.GetTransferContext(transfer.ID)
 	if !ok {
-		t.Fatal("expected wrapped NotFound error to initialize failed transfer tracking")
+		t.Fatal("expected wrapped root NotFound to initialize review tracking")
 	}
-	if got := transferContext.GetState(); got != TransferLifecycleFailed {
-		t.Fatalf("transfer state = %s, want Failed", got)
+	if got := transferContext.GetState(); got != TransferLifecycleNeedsReview {
+		t.Fatalf("transfer state = %s, want NeedsReview", got)
 	}
 }
 
@@ -189,7 +190,7 @@ func (f *fakePutioClient) GetFiles(ctx context.Context, folderID int64) ([]*puti
 	return f.files, f.filesErr
 }
 
-func TestProcessTransferRestoresLegacyCleanedTransferWithoutManifest(t *testing.T) {
+func TestProcessTransferHoldsLegacyCleanedTransferWithoutManifest(t *testing.T) {
 	client := &fakePutioClient{}
 	p := newTestProcessor(t, 100, false, client)
 	transfer := &putio.Transfer{ID: 101, Name: "already cleaned", FileID: 0}
@@ -200,8 +201,8 @@ func TestProcessTransferRestoresLegacyCleanedTransferWithoutManifest(t *testing.
 		t.Fatalf("GetAllTransferFiles called %d times, want 0 for Put.io root", client.getAllTransferFilesCalls)
 	}
 	ctx, ok := p.manager.coordinator.GetTransferContext(101)
-	if !ok || ctx.GetState() != TransferLifecycleProcessed {
-		t.Fatalf("legacy transfer was not restored as processed: context=%v exists=%v", ctx, ok)
+	if !ok || ctx.GetState() != TransferLifecycleNeedsReview {
+		t.Fatalf("legacy transfer was not held for review: context=%v exists=%v", ctx, ok)
 	}
 }
 
