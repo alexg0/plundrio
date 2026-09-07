@@ -109,10 +109,30 @@ func PendingRemovalPaths(targetDir string) ([]string, error) {
 // The lock serializes context publication and queue admission, never network
 // calls or blocked sends. Claimed jobs retain suppression until workers drain.
 // The returned category is captured under the same lock as marker reclamation.
-func (m *Manager) PrepareRemoval(id int64) (string, error) {
+func (m *Manager) PrepareRemoval(id int64, requireClassified bool) (string, error) {
 	m.removalMu.Lock()
 	defer m.removalMu.Unlock()
-	category := m.categories.Get(id)
+	if m.NeedsReview(id) {
+		return "", fmt.Errorf("transfer %d requires explicit reviewed record-only retirement", id)
+	}
+	if ctx, ok := m.coordinator.GetTransferContext(id); ok && ctx.GetState() == TransferLifecycleNeedsReview {
+		return "", fmt.Errorf("transfer %d requires explicit reviewed record-only retirement", id)
+	}
+	// Ready remote records require classification, checked atomically with
+	// retry-generation replacement and removal suppression. Pending ordinary
+	// removals have already forgotten their context and remain retryable.
+	if requireClassified && !m.RemovalPending(id) {
+		ctx, ok := m.coordinator.GetTransferContext(id)
+		if !ok || ctx.GetState() == TransferLifecycleInitial {
+			return "", fmt.Errorf("transfer %d local state is still being classified; retry after the next monitor poll", id)
+		}
+	}
+	return m.prepareRemovalLocked(id, m.categories.Get(id))
+}
+
+// prepareRemovalLocked requires removalMu's write lock. Review retirement uses
+// the same suppression mechanism while retaining its separate review marker.
+func (m *Manager) prepareRemovalLocked(id int64, category string) (string, error) {
 	if m.RemovalPending(id) {
 		var err error
 		category, err = m.removalCategory(id)

@@ -479,9 +479,57 @@ plundrio logs its activities to stdout. You can redirect these logs to a file or
 After restart, a Put.io `COMPLETED` or `SEEDING` transfer initially reports
 50% / downloading until Plundrio restores or verifies its local completion.
 This changes the status existing *arr clients see on restart and prevents
-premature import or removal while the local copy is still pending. Legacy
-records already cleaned by older versions remain recoverable without an
-invented file list.
+premature import or removal while the local copy is still pending.
+
+Upgrades can encounter old records whose source has gone but which have no
+manifest: either source ID zero or a positive source ID returning NotFound.
+Neither shape proves local completion. These records now enter **NeedsReview**,
+not completed or failed: stopped, 50%, unknown ETA, zero transfer rates, and an
+explanatory `errorString` without a download-failure signal. An unknown size uses
+one byte remaining as a sentinel, not a measured payload size. No file list or
+ownership is invented. Missing child folders during listing and invalid existing
+manifests remain errors; they are not classified as legacy source absence.
+
+The hold is persisted in `.plundrio-files/<id>.review.json`. Preserve these files:
+restarts, source reappearance, and remote ERROR status do not resume processing
+or authorize automatic deletion. Corrupt review markers also hold the record
+and require state repair. If storage cannot persist a marker, the current
+process remains held, but restart durability is not guaranteed; repair storage
+before restarting, and allow a monitor poll to persist the hold after repair.
+This is a safety change for zero-ID legacy records previously
+assumed complete, as well as positive-ID records previously reported failed.
+
+### Resolving a legacy review hold
+
+First verify the actual retained/imported copy in the consuming application;
+an old 100% display, matching directory name, or same-size file is not proof.
+If the copy is missing, recover or download it separately before retiring the
+old record. Do not fabricate a manifest or remove a review marker to force
+completion. A restored source or changed identity requires operator investigation;
+it is deliberately not an automatic resume/retirement path.
+
+After verifying the retained copy, an operator may send this explicit extension
+to the existing Transmission RPC endpoint, replacing `101` with the **one exact
+numeric transfer ID** reviewed:
+
+```json
+{"method":"torrent-remove","arguments":{"ids":[101],"delete-local-data":false,"plundrio-retire-reviewed":true,"plundrio-copy-verified":true}}
+```
+
+This acknowledgment is an operator assertion, not machine proof. The server
+rechecks the review marker, unchanged remote identity, completed remote status,
+absent source root and absent manifest. It removes **only the transfer record**:
+neither Put.io source deletion nor local deletion is called. Any failure retains
+the durable hold; retry the same explicit request after resolving the error.
+Ordinary `torrent-remove` is rejected for review holds, even after restart or
+failed retirement. No batch IDs, hashes, missing acknowledgment, or local-delete
+request is accepted. Retirement does not backfill ownership: preserved local
+files may subsequently appear unmanaged to explicit reconciliation.
+
+Ordinary removal of a remotely ready record also waits until its local state
+is classified; retry after the next monitor poll. This closes the initial
+listing/retirement race without disabling explicit cancellation of active
+downloads. Failed reviewed retirement remains a warning, not a download error.
 
 `.plundrio-files/` is reserved for transfer ownership manifests in the download
 root. Preserve it across restarts and exclude it from media scans, filesystem
