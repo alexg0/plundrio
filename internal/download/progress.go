@@ -22,7 +22,7 @@ func (m *Manager) trackDownloadProgress(
 	resp *grab.Response,
 	done <-chan struct{},
 	progressTicker *time.Ticker,
-	cancelDownload context.CancelFunc,
+	cancelDownload context.CancelCauseFunc,
 ) {
 	log.Info("download").
 		Str("file_name", state.Name).
@@ -110,7 +110,7 @@ func (m *Manager) trackDownloadProgress(
 					Str("file_name", state.Name).
 					Dur("stalled_for", stalled).
 					Msg("Download stalled, cancelling")
-				cancelDownload()
+				cancelDownload(errDownloadStalled)
 				return
 			}
 		case <-ctx.Done():

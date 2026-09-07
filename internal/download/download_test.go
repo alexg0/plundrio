@@ -40,6 +40,11 @@ func TestIsTransientError(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "download_stalled_error",
+			err:  fmt.Errorf("download attempt failed: %w", errDownloadStalled),
+			want: true,
+		},
+		{
 			name: "connection_reset",
 			err:  errors.New("connection reset"),
 			want: true,
