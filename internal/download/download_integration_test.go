@@ -260,7 +260,7 @@ func TestRemovedStalledWorkerDrainsWithoutRetryOrSourceCleanup(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("download never started")
 	}
-	if _, err := m.PrepareRemoval(1); err != nil {
+	if _, err := m.PrepareRemoval(1, false); err != nil {
 		t.Fatal(err)
 	}
 	m.RemoveTransfer(1)

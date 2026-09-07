@@ -45,6 +45,13 @@ func (s *classificationService) GetTransferContext(int64) (*download.TransferCon
 	return s.local, s.local != nil
 }
 
+func (s *classificationService) PrepareRemoval(id int64, requireClassified bool) (string, error) {
+	if requireClassified && (s.local == nil || s.local.GetState() == download.TransferLifecycleInitial) {
+		return "", errors.New("classification pending")
+	}
+	return s.torrentAddDownloadService.PrepareRemoval(id, requireClassified)
+}
+
 func TestOrdinaryRemovalWaitsForReadyTransferClassification(t *testing.T) {
 	for _, local := range []*download.TransferContext{nil, download.NewTransferContext(101, 0, download.TransferLifecycleInitial)} {
 		client := &torrentAddClient{transfers: []*putio.Transfer{{ID: 101, FileID: 500, Name: "Book", Status: "COMPLETED"}}}

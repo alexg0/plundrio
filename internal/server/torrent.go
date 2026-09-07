@@ -517,17 +517,10 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 
 		// Capture the deletion destination before remote mutation: the monitor
 		// may reclaim the durable category as soon as remote absence is visible.
-		// A ready remote record may still be awaiting legacy/source
-		// classification. Do not let removal bypass a hold that is being built.
-		// Active remote/local downloads and already-pending retries keep their
-		// existing explicit-cancellation behavior.
-		if (transfer.Status == "COMPLETED" || transfer.Status == "SEEDING") && !s.dlService.RemovalPending(transfer.ID) {
-			local, ok := s.dlService.GetTransferContext(transfer.ID)
-			if !ok || local.GetState() == download.TransferLifecycleInitial {
-				return nil, fmt.Errorf("transfer %d local state is still being classified; retry after the next monitor poll", transfer.ID)
-			}
-		}
-		category, err := s.dlService.PrepareRemoval(transfer.ID)
+		// Ready remote records must be classified before cancellation; the
+		// manager checks this under the same lock as retry generation changes.
+		ready := transfer.Status == "COMPLETED" || transfer.Status == "SEEDING"
+		category, err := s.dlService.PrepareRemoval(transfer.ID, ready)
 		if err != nil {
 			return nil, fmt.Errorf("preserve removal state for transfer %d: %w", transfer.ID, err)
 		}

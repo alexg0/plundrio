@@ -355,6 +355,8 @@ const maxReprocessAttempts = 3
 // forever, so it was never retried, its put.io file was never cleaned up, and
 // *arr never saw it complete.
 func (p *TransferProcessor) shouldProcess(transfer *putio.Transfer) bool {
+	p.manager.removalMu.RLock()
+	defer p.manager.removalMu.RUnlock()
 	if p.manager.RemovalPending(transfer.ID) || p.manager.NeedsReview(transfer.ID) {
 		return false
 	}

@@ -22,6 +22,34 @@ func markReviewForTest(t *testing.T, m *Manager, transfer *putio.Transfer) {
 	}
 }
 
+func TestReadyRemovalRequiresAtomicClassification(t *testing.T) {
+	for _, state := range []TransferLifecycleState{TransferLifecycleInitial, TransferLifecycleFailed, TransferLifecycleProcessed} {
+		t.Run(state.String(), func(t *testing.T) {
+			m := newManagerForTest(t, &fakeClient{})
+			ctx := NewTransferContext(101, 0, state)
+			m.coordinator.transfers.Store(int64(101), ctx)
+			if state == TransferLifecycleFailed {
+				// Reprocessing discards Failed before reserving the next Initial
+				// context. Removal must recheck that gap under its own lock.
+				if !m.processor.shouldProcess(&putio.Transfer{ID: 101}) {
+					t.Fatal("failed retry not reserved")
+				}
+			}
+			_, err := m.PrepareRemoval(101, true)
+			if state == TransferLifecycleProcessed {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := m.PrepareRemoval(101, true); err != nil {
+					t.Fatal("pending ordinary retry was blocked", err)
+				}
+			} else if err == nil || m.RemovalPending(101) {
+				t.Fatal("unclassified generation accepted/mutated removal")
+			}
+		})
+	}
+}
+
 func TestReviewSurvivesRestartAndRemoteChanges(t *testing.T) {
 	for _, fileID := range []int64{0, 501} {
 		t.Run(fmt.Sprint(fileID), func(t *testing.T) {
@@ -51,7 +79,7 @@ func TestReviewSurvivesRestartAndRemoteChanges(t *testing.T) {
 				if restarted.processor.shouldProcess(&changed) {
 					t.Fatal("review became retryable")
 				}
-				if _, err := restarted.PrepareRemoval(101); err == nil {
+				if _, err := restarted.PrepareRemoval(101, false); err == nil {
 					t.Fatal("generic removal accepted review")
 				}
 			}
@@ -100,7 +128,7 @@ func TestReviewStorageFailureKeepsInMemoryHold(t *testing.T) {
 	if !ok || ctx.GetState() != TransferLifecycleNeedsReview || ctx.GetError() != nil {
 		t.Fatal("storage failure lost operator hold")
 	}
-	if _, err := m.PrepareRemoval(101); err == nil {
+	if _, err := m.PrepareRemoval(101, false); err == nil {
 		t.Fatal("broken review storage allowed generic deletion")
 	}
 	if err := os.Remove(m.transferFiles.stateDir); err != nil {
@@ -109,7 +137,7 @@ func TestReviewStorageFailureKeepsInMemoryHold(t *testing.T) {
 	if m.NeedsReview(101) {
 		t.Fatal("test should now have only an in-memory hold")
 	}
-	if _, err := m.PrepareRemoval(101); err == nil {
+	if _, err := m.PrepareRemoval(101, false); err == nil {
 		t.Fatal("in-memory review allowed generic deletion after storage repair")
 	}
 	changed := *transfer
@@ -209,7 +237,7 @@ func TestReviewRetirementKeepsRecordOnlyModeAcrossFailureAndRestart(t *testing.T
 				if _, ok := m.GetTransferContext(101); ok {
 					t.Fatal("pending retirement retained context")
 				}
-				if _, err := m.PrepareRemoval(101); err == nil {
+				if _, err := m.PrepareRemoval(101, false); err == nil {
 					t.Fatal("generic retry escaped record-only mode")
 				}
 				m = New(m.cfg, client)
