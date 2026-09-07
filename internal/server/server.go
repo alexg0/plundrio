@@ -31,10 +31,13 @@ type PutioClient interface {
 type DownloadService interface {
 	GetTransfers() []*putio.Transfer
 	GetTransferContext(transferID int64) (*download.TransferContext, bool)
+	GetTransferFiles(transferID int64) ([]download.TransferFile, bool)
 	SetCategory(transferID int64, category string)
 	GetCategory(transferID int64) string
 	RemoveCategory(transferID int64)
 	RemoveTransfer(transferID int64)
+	PrepareRemoval(transferID int64) (string, error)
+	RemovalPending(transferID int64) bool
 }
 
 // Server handles transmission-rpc requests

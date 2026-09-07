@@ -59,7 +59,7 @@ put.io essentially performs the same download process.
 
 - 🔄 Seamless integration with Sonarr, Radarr, and other *arr applications
   supporting Transmission RPC
-- 🌐 Minimal local state; multiple instances per put.io account supported, one per download directory
+- 🌐 Stateless architecture; multiple instances per put.io account supported
 - ⚡ Fast and efficient downloads from put.io (with resume support)
 - 🔄 Parallel downloads with configurable worker count to maximize bandwidth
 - 🧹 Automatic cleanup of completed transfers
@@ -380,16 +380,47 @@ Yes, plundrio will monitor and download any transfers in your configured put.io 
 plundrio focuses on automation and integration with *arr applications, while the official client offers a more general-purpose interface.
 
 **Can I run multiple instances of plundrio?**<br/>
-Yes, as long as each instance uses its own `--target` directory. plundrio keeps a small
-amount of state there: `.plundrio-state.json` holds the put.io transfer ID → category
-mapping used by `use-categories-target`. Instances sharing a download directory will
-overwrite each other's copy of it.
+Yes, plundrio is stateless and can be run in multiple instances, even pointing to the same put.io account with different configurations.
 
 **Does plundrio support VPNs or proxies?**<br/>
 plundrio uses your system's network configuration. If your system routes through a VPN or proxy, plundrio will use that connection.
 
 **How can I monitor plundrio's status?**<br/>
 plundrio logs its activities to stdout. You can redirect these logs to a file or use a log management system.
+
+## Transmission restart and file metadata
+
+After restart, a Put.io `COMPLETED` or `SEEDING` transfer initially reports
+50% / downloading until Plundrio restores or verifies its local completion.
+This changes the status existing *arr clients see on restart and prevents
+premature import or removal while the local copy is still pending. Legacy
+records already cleaned by older versions remain recoverable without an
+invented file list.
+
+`.plundrio-files/` is reserved for transfer ownership manifests in the download
+root. Preserve it across restarts and exclude it from media scans, filesystem
+reconciliation, and unmanaged-file deletion. Transmission `files` names are
+relative to `downloadDir`; `bytesCompleted` currently reports whole-transfer
+completion (zero until complete, then each file's full length).
+
+`torrent-remove` persists a removal marker before deleting remote data. Remote
+transfer deletion gets at most three attempts per request. If it still fails,
+the RPC returns an error, the torrent reports stopped with a removal error,
+and local processing stays suspended across restarts. Local files are retained
+on that failure even when `delete-local-data` was requested; repeat the request
+after fixing Put.io access to finish removal.
+
+Pending removals release active category, transfer, and retry tracking. Their
+category and ownership manifest stay on disk under `.plundrio-files/`, without
+a permanent in-memory tombstone cache. Metadata is removed after a successful
+retry or after a successful full Put.io listing confirms the ID is absent and
+any active local worker has drained. Moving a transfer outside the configured
+folder does not count as deletion. Disk retention is bounded by surviving
+remote records, not a time limit: during an API outage these safety records
+remain. To resolve one manually, delete that exact transfer on Put.io and let
+the next successful poll reclaim its metadata; do not delete marker files to
+force a retry. An already-running file download may finish, but queued work,
+new attempts, and source cleanup cannot restart the removed transfer.
 
 ## 🤝 Contributing
 

@@ -167,6 +167,7 @@ func TestGetTransfersEmptyBeforeFirstPoll(t *testing.T) {
 // panics even when the stopChan case of the select is also ready.
 func TestQueueDownloadDuringStopDoesNotPanic(t *testing.T) {
 	m := newManagerForTest(t, &fakeClient{})
+	m.coordinator.InitiateTransfer(1, "test", 1, 5000)
 	m.Start()
 
 	var wg sync.WaitGroup
@@ -206,6 +207,7 @@ func TestStopDoesNotDeadlockOnFullQueue(t *testing.T) {
 
 	// Queue past the buffer (WorkerCount*BufferMultiple) so the sender blocks
 	// on the channel send with no worker able to take it.
+	m.coordinator.InitiateTransfer(1, "test", 1, 100)
 	queuing := make(chan struct{})
 	go func() {
 		defer close(queuing)
