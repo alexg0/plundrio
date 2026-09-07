@@ -86,6 +86,14 @@ func (m *Manager) markNeedsReview(transfer *putio.Transfer) error {
 		return fmt.Errorf("transfer %d removal is pending", transfer.ID)
 	}
 	m.publishReview(transfer)
+	current, _ := m.GetTransferContext(transfer.ID)
+	current.mu.Lock()
+	if current.review == nil {
+		current.review = &transferReview{ID: transfer.ID, FileID: transfer.FileID, Name: transfer.Name,
+			SaveParentID: transfer.SaveParentID, Category: m.categories.Get(transfer.ID)}
+	}
+	review := *current.review
+	current.mu.Unlock()
 	if m.NeedsReview(transfer.ID) {
 		_, err := m.loadReview(transfer.ID)
 		return err
@@ -93,8 +101,6 @@ func (m *Manager) markNeedsReview(transfer *putio.Transfer) error {
 	if err := m.requireAbsentReviewManifest(transfer.ID); err != nil {
 		return err
 	}
-	review := transferReview{ID: transfer.ID, FileID: transfer.FileID, Name: transfer.Name,
-		SaveParentID: transfer.SaveParentID, Category: m.categories.Get(transfer.ID)}
 	data, err := json.Marshal(review)
 	if err != nil {
 		return err
@@ -136,7 +142,19 @@ func (m *Manager) restoreReview(transfer *putio.Transfer) bool {
 	m.removalMu.RLock()
 	defer m.removalMu.RUnlock()
 	if !m.NeedsReview(transfer.ID) {
-		return false
+		current, ok := m.GetTransferContext(transfer.ID)
+		if !ok || current.GetState() != TransferLifecycleNeedsReview {
+			return false
+		}
+		// A previous persistence attempt may have failed. Repairing storage
+		// must make the existing hold durable, not require releasing it first.
+		original := *transfer
+		original.Name, original.FileID = current.Name, current.FileID
+		if err := m.markNeedsReview(&original); err != nil {
+			log.Error("transfers").Int64("transfer_id", transfer.ID).Err(err).
+				Msg("Review hold remains in memory; durable persistence still unavailable")
+		}
+		return true
 	}
 	if m.RemovalPending(transfer.ID) {
 		return true

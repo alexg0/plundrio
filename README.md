@@ -409,7 +409,8 @@ restarts, source reappearance, and remote ERROR status do not resume processing
 or authorize automatic deletion. Corrupt review markers also hold the record
 and require state repair. If storage cannot persist a marker, the current
 process remains held, but restart durability is not guaranteed; repair storage
-before restarting. This is a safety change for zero-ID legacy records previously
+before restarting, and allow a monitor poll to persist the hold after repair.
+This is a safety change for zero-ID legacy records previously
 assumed complete, as well as positive-ID records previously reported failed.
 
 ### Resolving a legacy review hold
@@ -438,6 +439,11 @@ Ordinary `torrent-remove` is rejected for review holds, even after restart or
 failed retirement. No batch IDs, hashes, missing acknowledgment, or local-delete
 request is accepted. Retirement does not backfill ownership: preserved local
 files may subsequently appear unmanaged to explicit reconciliation.
+
+Ordinary removal of a remotely ready record also waits until its local state
+is classified; retry after the next monitor poll. This closes the initial
+listing/retirement race without disabling explicit cancellation of active
+downloads. Failed reviewed retirement remains a warning, not a download error.
 
 `.plundrio-files/` is reserved for transfer ownership manifests in the download
 root. Preserve it across restarts and exclude it from media scans, filesystem

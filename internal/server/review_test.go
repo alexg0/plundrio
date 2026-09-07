@@ -36,6 +36,29 @@ type reviewRPCService struct {
 
 func (s *reviewRPCService) GetTransfers() []*putio.Transfer { return s.transfers }
 
+type classificationService struct {
+	*torrentAddDownloadService
+	local *download.TransferContext
+}
+
+func (s *classificationService) GetTransferContext(int64) (*download.TransferContext, bool) {
+	return s.local, s.local != nil
+}
+
+func TestOrdinaryRemovalWaitsForReadyTransferClassification(t *testing.T) {
+	for _, local := range []*download.TransferContext{nil, download.NewTransferContext(101, 0, download.TransferLifecycleInitial)} {
+		client := &torrentAddClient{transfers: []*putio.Transfer{{ID: 101, FileID: 500, Name: "Book", Status: "COMPLETED"}}}
+		service := &classificationService{torrentAddDownloadService: &torrentAddDownloadService{}, local: local}
+		srv := &Server{cfg: &config.Config{TargetDir: t.TempDir()}, client: client, dlService: service}
+		if _, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[101],"delete-local-data":true}`)); err == nil {
+			t.Fatal("unclassified ready record removal accepted")
+		}
+		if len(client.deleted) != 0 || len(client.deletedFiles) != 0 || service.RemovalPending(101) {
+			t.Fatal("classification guard mutated state")
+		}
+	}
+}
+
 func newReviewRPCServer(t *testing.T, sourceID int64) (*Server, *reviewRPCClient, *download.Manager) {
 	t.Helper()
 	root := t.TempDir()
@@ -117,6 +140,14 @@ func TestReviewRetirementPreservesFilesAndCanRetryAfterRestart(t *testing.T) {
 			}
 			if len(client.deleted) != 3 || !manager.RemovalPending(101) || !manager.NeedsReview(101) {
 				t.Fatal("failure lost durable holds/bounded retries")
+			}
+			response, err := srv.handleTorrentGet(context.Background(), json.RawMessage(`{"fields":["files"]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			info := response.(map[string]interface{})["torrents"].([]map[string]interface{})[0]
+			if info["error"] != false || info["percentDone"] != 0.5 || info["plundrioState"] != "needs-review" {
+				t.Fatalf("failed retirement must remain a review warning, got %+v", info)
 			}
 			restarted := download.New(srv.cfg, client)
 			srv.dlService = &reviewRPCService{restarted, client.transfers}

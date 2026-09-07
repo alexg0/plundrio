@@ -88,7 +88,8 @@ func TestReviewStorageFailureKeepsInMemoryHold(t *testing.T) {
 	if err := os.WriteFile(m.transferFiles.stateDir, []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	transfer := &putio.Transfer{ID: 101, Name: "Book"}
+	transfer := &putio.Transfer{ID: 101, Name: "Book", SaveParentID: 42}
+	m.SetCategory(101, "books")
 	m.removalMu.RLock()
 	err := m.markNeedsReview(transfer)
 	m.removalMu.RUnlock()
@@ -110,6 +111,19 @@ func TestReviewStorageFailureKeepsInMemoryHold(t *testing.T) {
 	}
 	if _, err := m.PrepareRemoval(101); err == nil {
 		t.Fatal("in-memory review allowed generic deletion after storage repair")
+	}
+	changed := *transfer
+	changed.SaveParentID, changed.FileID, changed.Name = 99, 999, "Renamed"
+	m.SetCategory(101, "changed")
+	if !m.restoreReview(&changed) || !m.NeedsReview(101) {
+		t.Fatal("next poll did not persist the hold after storage repair")
+	}
+	review, err := m.loadReview(101)
+	if err != nil || review.SaveParentID != 42 || review.FileID != 0 || review.Name != "Book" || review.Category != "books" {
+		t.Fatalf("storage retry adopted changed identity: %+v, %v", review, err)
+	}
+	if !New(m.cfg, &fakeClient{}).restoreReview(transfer) {
+		t.Fatal("repaired hold did not survive restart")
 	}
 }
 

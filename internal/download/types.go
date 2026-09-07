@@ -80,6 +80,7 @@ type TransferContext struct {
 	localETA       time.Time
 	state          TransferLifecycleState
 	err            error
+	review         *transferReview // original identity retained if durable publication fails
 	mu             sync.RWMutex
 }
 

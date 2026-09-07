@@ -392,15 +392,18 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 			}
 			torrentInfo["files"] = files
 		}
-		if s.dlService.NeedsReview(t.ID) || (transferCtx != nil && transferCtx.GetState() == download.TransferLifecycleNeedsReview) {
-			applyReviewStatus(torrentInfo, t.Size, slices.Contains(params.Fields, "files"))
-		}
 		if s.dlService.RemovalPending(t.ID) {
 			// A failed removal is terminal local state, even without a context.
 			torrentInfo["status"] = trStatusStopped
 			torrentInfo["rateDownload"] = 0
 			torrentInfo["error"] = true
 			torrentInfo["errorString"] = "remote deletion pending; retry torrent-remove or remove the transfer on Put.io"
+		}
+		if s.dlService.NeedsReview(t.ID) || (transferCtx != nil && transferCtx.GetState() == download.TransferLifecycleNeedsReview) {
+			applyReviewStatus(torrentInfo, t.Size, slices.Contains(params.Fields, "files"))
+			if s.dlService.RemovalPending(t.ID) {
+				torrentInfo["errorString"] = "Reviewed record retirement pending; retry the explicit reviewed-retirement request. Local files remain unverified and untouched."
+			}
 		}
 
 		torrents = append(torrents, torrentInfo)
@@ -514,6 +517,16 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 
 		// Capture the deletion destination before remote mutation: the monitor
 		// may reclaim the durable category as soon as remote absence is visible.
+		// A ready remote record may still be awaiting legacy/source
+		// classification. Do not let removal bypass a hold that is being built.
+		// Active remote/local downloads and already-pending retries keep their
+		// existing explicit-cancellation behavior.
+		if (transfer.Status == "COMPLETED" || transfer.Status == "SEEDING") && !s.dlService.RemovalPending(transfer.ID) {
+			local, ok := s.dlService.GetTransferContext(transfer.ID)
+			if !ok || local.GetState() == download.TransferLifecycleInitial {
+				return nil, fmt.Errorf("transfer %d local state is still being classified; retry after the next monitor poll", transfer.ID)
+			}
+		}
 		category, err := s.dlService.PrepareRemoval(transfer.ID)
 		if err != nil {
 			return nil, fmt.Errorf("preserve removal state for transfer %d: %w", transfer.ID, err)
