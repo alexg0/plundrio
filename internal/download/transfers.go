@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/elsbrock/go-putio"
+	"github.com/elsbrock/plundrio/internal/api"
 	"github.com/elsbrock/plundrio/internal/log"
 )
 
@@ -125,6 +126,11 @@ func (p *TransferProcessor) checkTransfers() {
 		}
 		inFolder = append(inFolder, t)
 		if p.manager.RemovalPending(t.ID) {
+			continue
+		}
+		// Durable review holds take precedence over remote status, including
+		// ERROR, so a restart cannot retry/delete an unverified record.
+		if p.manager.restoreReview(t) {
 			continue
 		}
 		byStatus[t.Status] = append(byStatus[t.Status], t)
@@ -349,7 +355,7 @@ const maxReprocessAttempts = 3
 // forever, so it was never retried, its put.io file was never cleaned up, and
 // *arr never saw it complete.
 func (p *TransferProcessor) shouldProcess(transfer *putio.Transfer) bool {
-	if p.manager.RemovalPending(transfer.ID) {
+	if p.manager.RemovalPending(transfer.ID) || p.manager.NeedsReview(transfer.ID) {
 		return false
 	}
 	ctx, exists := p.manager.coordinator.GetTransferContext(transfer.ID)
@@ -446,7 +452,7 @@ func (p *TransferProcessor) prepareTransfer(transfer *putio.Transfer) ([]*putio.
 	// Reserve a generation before network I/O. Removal can forget it even if
 	// its durable marker is reclaimed before the listing returns.
 	p.manager.removalMu.RLock()
-	if p.manager.RemovalPending(transfer.ID) {
+	if p.manager.RemovalPending(transfer.ID) || p.manager.NeedsReview(transfer.ID) {
 		p.manager.removalMu.RUnlock()
 		return nil, nil
 	}
@@ -475,7 +481,7 @@ func (p *TransferProcessor) prepareTransfer(transfer *putio.Transfer) ([]*putio.
 	// were a transfer file. This commonly occurs when Plundrio restarts after
 	// local completion but before the Transmission client removes the transfer.
 	if transfer.FileID == 0 {
-		p.restoreCleanedTransfer(transfer, true)
+		p.restoreCleanedTransfer(transfer)
 		return nil, nil
 	}
 
@@ -572,25 +578,18 @@ func buildTransferFileManifest(transfer *putio.Transfer, files []*putio.File) ([
 	return manifest, nil
 }
 
-func (p *TransferProcessor) restoreCleanedTransfer(transfer *putio.Transfer, allowLegacy bool) {
+func (p *TransferProcessor) restoreCleanedTransfer(transfer *putio.Transfer) {
 	files, err := p.manager.transferFiles.load(transfer.ID)
 	if err != nil {
 		p.failCleanedTransfer(transfer, err)
 		return
 	}
 	if len(files) == 0 {
-		if !allowLegacy {
-			p.failCleanedTransfer(transfer, errors.New("source file is gone and no authoritative file manifest exists"))
-			return
+		// Source absence proves neither local completion nor file ownership.
+		if err := p.manager.markNeedsReview(transfer); err != nil {
+			log.Error("transfers").Int64("transfer_id", transfer.ID).Err(err).
+				Msg("Could not persist review hold; repair state storage before restarting")
 		}
-		// Transfers cleaned by older Plundrio versions have no manifest to
-		// restore. Preserve the pre-manifest restart behavior: do not invent a
-		// file list, but restore the transfer as processed so clients can retire
-		// the legacy record instead of seeing a permanent download failure.
-		if !p.initializeTransfer(transfer, 0) {
-			return
-		}
-		p.manager.cleanupTransfer(transfer.ID)
 		return
 	}
 
@@ -598,7 +597,10 @@ func (p *TransferProcessor) restoreCleanedTransfer(transfer *putio.Transfer, all
 		p.failCleanedTransfer(transfer, err)
 		return
 	}
-	if !p.initializeTransfer(transfer, 0) {
+	// The root is already absent; restoration must not issue a fresh delete.
+	cleanedTransfer := *transfer
+	cleanedTransfer.FileID = 0
+	if !p.initializeTransfer(&cleanedTransfer, 0) {
 		return
 	}
 	p.manager.cleanupTransfer(transfer.ID)
@@ -647,15 +649,20 @@ func (p *TransferProcessor) failCleanedTransfer(transfer *putio.Transfer, err er
 
 // handleTransferError processes transfer errors appropriately
 func (p *TransferProcessor) handleTransferError(transfer *putio.Transfer, err error) {
-	if isPutioNotFound(err) {
+	var missing *api.TransferSourceNotFoundError
+	if errors.As(err, &missing) && missing.FileID == transfer.FileID && isPutioNotFound(err) {
 		log.Debug("transfers").
 			Str("name", transfer.Name).
 			Int64("id", transfer.ID).
-			Msg("Files no longer exist on Put.io, cleaning up")
+			Msg("Source no longer exists on Put.io; checking local completion evidence")
 
-		cleanedTransfer := *transfer
-		cleanedTransfer.FileID = 0
-		p.restoreCleanedTransfer(&cleanedTransfer, false)
+		p.restoreCleanedTransfer(transfer)
+		return
+	}
+	if isPutioNotFound(err) {
+		// A child can disappear while the root remains. Keep this a bounded
+		// listing failure, not evidence of legacy source absence.
+		p.failCleanedTransfer(transfer, err)
 		return
 	}
 
@@ -791,6 +798,12 @@ func (p *TransferProcessor) processErroredTransfers(byStatus transfersByStatus) 
 	const maxRetryAttempts = 3
 
 	for _, transfer := range byStatus["ERROR"] {
+		if p.manager.RemovalPending(transfer.ID) || p.manager.NeedsReview(transfer.ID) {
+			continue
+		}
+		if ctx, ok := p.manager.GetTransferContext(transfer.ID); ok && ctx.GetState() == TransferLifecycleNeedsReview {
+			continue
+		}
 		// Get current retry count
 		retryCountValue, exists := p.retryAttempts.Load(transfer.ID)
 		retryCount := 0

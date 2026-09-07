@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/elsbrock/go-putio"
@@ -87,6 +88,11 @@ func (d *mockDownloadService) RemoveCategory(transferID int64) { delete(d.catego
 
 func (d *mockDownloadService) PrepareRemoval(int64) (string, error) { return "", nil }
 func (d *mockDownloadService) RemovalPending(int64) bool            { return false }
+
+func (d *mockDownloadService) NeedsReview(int64) bool { return false }
+func (d *mockDownloadService) PrepareReviewRetirement(context.Context, *putio.Transfer) (string, error) {
+	return "", fmt.Errorf("not a reviewed record")
+}
 
 func (d *mockDownloadService) RemoveTransfer(transferID int64) {
 	d.removedTransfers = append(d.removedTransfers, transferID)

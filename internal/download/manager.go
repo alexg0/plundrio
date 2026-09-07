@@ -134,6 +134,10 @@ func (m *Manager) RemoveTransfer(transferID int64) {
 			Msg("Failed to remove transfer file state")
 		return
 	}
+	if err := m.removeReview(transferID); err != nil {
+		log.Error("files").Int64("transfer_id", transferID).Err(err).Msg("Failed to remove review hold")
+		return
+	}
 	if err := os.Remove(m.removalPath(transferID)); err != nil && !os.IsNotExist(err) {
 		log.Error("files").Err(err).Msg("Failed to remove transfer removal marker")
 	}

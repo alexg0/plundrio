@@ -74,7 +74,11 @@ func (fs *TransferFileStore) load(transferID int64) ([]TransferFile, error) {
 	data, err := os.ReadFile(fs.path(transferID))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			// A dangling symlink is existing but unreadable evidence, not an
+			// absent legacy manifest. Only genuine path absence allows review.
+			if _, statErr := os.Lstat(fs.path(transferID)); os.IsNotExist(statErr) {
+				return nil, nil
+			}
 		}
 		return nil, fmt.Errorf("read transfer file state: %w", err)
 	}

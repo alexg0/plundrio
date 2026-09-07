@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 
 	"github.com/elsbrock/go-putio"
 	"github.com/elsbrock/plundrio/internal/api"
@@ -35,7 +36,7 @@ func (m *Manager) reviewPath(id int64) string {
 // during pending retirement, after the in-memory context has been forgotten.
 func (m *Manager) NeedsReview(id int64) bool {
 	_, err := os.Lstat(m.reviewPath(id))
-	return !os.IsNotExist(err)
+	return !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR)
 }
 
 func (m *Manager) loadReview(id int64) (transferReview, error) {
@@ -84,15 +85,14 @@ func (m *Manager) markNeedsReview(transfer *putio.Transfer) error {
 	if m.RemovalPending(transfer.ID) {
 		return fmt.Errorf("transfer %d removal is pending", transfer.ID)
 	}
+	m.publishReview(transfer)
 	if m.NeedsReview(transfer.ID) {
-		m.publishReview(transfer)
 		_, err := m.loadReview(transfer.ID)
 		return err
 	}
 	if err := m.requireAbsentReviewManifest(transfer.ID); err != nil {
 		return err
 	}
-	m.publishReview(transfer)
 	review := transferReview{ID: transfer.ID, FileID: transfer.FileID, Name: transfer.Name,
 		SaveParentID: transfer.SaveParentID, Category: m.categories.Get(transfer.ID)}
 	data, err := json.Marshal(review)

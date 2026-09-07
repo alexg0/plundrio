@@ -38,6 +38,8 @@ type DownloadService interface {
 	RemoveTransfer(transferID int64)
 	PrepareRemoval(transferID int64) (string, error)
 	RemovalPending(transferID int64) bool
+	NeedsReview(transferID int64) bool
+	PrepareReviewRetirement(context.Context, *putio.Transfer) (string, error)
 }
 
 // Server handles transmission-rpc requests
