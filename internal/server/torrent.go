@@ -20,6 +20,8 @@ import (
 const (
 	transmissionLimitModeSingle    = 1
 	transmissionLimitModeUnlimited = 2
+	trErrorNone                    = 0
+	trErrorLocal                   = 3
 )
 
 // extractCategory returns the relative category path from downloadDir.
@@ -358,6 +360,16 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 			seedIdleMode = transmissionLimitModeSingle
 			secondsSeeding = 1
 		}
+		errorCode := trErrorNone
+		errorString := t.ErrorMessage
+		if transferCtx != nil {
+			if localErr := transferCtx.GetError(); localErr != nil {
+				errorString = localErr.Error()
+			}
+		}
+		if errorString != "" {
+			errorCode = trErrorLocal
+		}
 
 		// Override ETA and rate with local values when available
 		if !prog.LocalETA.IsZero() {
@@ -403,8 +415,8 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 				}
 				return 0
 			}(),
-			"error":       t.ErrorMessage != "",
-			"errorString": t.ErrorMessage,
+			"error":       errorCode,
+			"errorString": errorString,
 		}
 
 		if slices.Contains(params.Fields, "files") {
@@ -418,7 +430,7 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 			// A failed removal is terminal local state, even without a context.
 			torrentInfo["status"] = trStatusStopped
 			torrentInfo["rateDownload"] = 0
-			torrentInfo["error"] = true
+			torrentInfo["error"] = trErrorLocal
 			torrentInfo["errorString"] = "remote deletion pending; retry torrent-remove or remove the transfer on Put.io"
 		}
 		if s.dlService.NeedsReview(t.ID) || (transferCtx != nil && transferCtx.GetState() == download.TransferLifecycleNeedsReview) {
