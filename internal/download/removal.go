@@ -59,6 +59,9 @@ func (m *Manager) PrepareRemoval(id int64) (string, error) {
 	if m.NeedsReview(id) {
 		return "", fmt.Errorf("transfer %d requires explicit reviewed record-only retirement", id)
 	}
+	if ctx, ok := m.coordinator.GetTransferContext(id); ok && ctx.GetState() == TransferLifecycleNeedsReview {
+		return "", fmt.Errorf("transfer %d requires explicit reviewed record-only retirement", id)
+	}
 	return m.prepareRemovalLocked(id, m.categories.Get(id))
 }
 

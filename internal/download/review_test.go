@@ -102,6 +102,15 @@ func TestReviewStorageFailureKeepsInMemoryHold(t *testing.T) {
 	if _, err := m.PrepareRemoval(101); err == nil {
 		t.Fatal("broken review storage allowed generic deletion")
 	}
+	if err := os.Remove(m.transferFiles.stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if m.NeedsReview(101) {
+		t.Fatal("test should now have only an in-memory hold")
+	}
+	if _, err := m.PrepareRemoval(101); err == nil {
+		t.Fatal("in-memory review allowed generic deletion after storage repair")
+	}
 }
 
 func TestReviewRetirementRejectsChangedSourceAndManifest(t *testing.T) {
