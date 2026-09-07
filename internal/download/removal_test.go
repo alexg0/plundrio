@@ -20,7 +20,7 @@ func TestRemovalReleasesMemoryAndSuppressesRestart(t *testing.T) {
 	if err := m.transferFiles.Set(101, []TransferFile{{Name: "Book/book.m4b", Length: 10}}); err != nil {
 		t.Fatal(err)
 	}
-	if category, err := m.PrepareRemoval(101); err != nil || category != "books" {
+	if category, err := m.PrepareRemoval(101, false); err != nil || category != "books" {
 		t.Fatalf("prepare category = %q, error = %v", category, err)
 	}
 	if _, ok := m.GetTransferContext(101); ok {
@@ -72,7 +72,7 @@ func TestRemovalPrunesOnlyAfterSuccessfulFullListing(t *testing.T) {
 	if err := m.transferFiles.Set(101, []TransferFile{{Name: "Book/book.m4b", Length: 10}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.PrepareRemoval(101); err != nil {
+	if _, err := m.PrepareRemoval(101, false); err != nil {
 		t.Fatal(err)
 	}
 	listErr = errors.New("unavailable")
@@ -104,7 +104,7 @@ func TestRemovalKeepsSuppressionUntilActiveWorkerDrains(t *testing.T) {
 	if err := m.transferFiles.Set(101, []TransferFile{{Name: "Book/book.m4b", Length: 10}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.PrepareRemoval(101); err != nil {
+	if _, err := m.PrepareRemoval(101, false); err != nil {
 		t.Fatal(err)
 	}
 	m.RemoveTransfer(101)
@@ -135,7 +135,7 @@ func TestRemovalInvalidatesScheduledRetryAfterMarkerReclaimed(t *testing.T) {
 	if !m.scheduleDownloadRetry(job, io.ErrUnexpectedEOF) {
 		t.Fatal("retry not scheduled")
 	}
-	if _, err := m.PrepareRemoval(101); err != nil {
+	if _, err := m.PrepareRemoval(101, false); err != nil {
 		t.Fatal(err)
 	}
 	m.pruneRemovals(m.pendingRemovals(), nil)
@@ -153,7 +153,7 @@ func TestRemovalInvalidatesScheduledRetryAfterMarkerReclaimed(t *testing.T) {
 
 func TestUnreadableRemovalStateFailsClosed(t *testing.T) {
 	m := newManagerForTest(t, &fakeClient{})
-	if _, err := m.PrepareRemoval(101); err != nil {
+	if _, err := m.PrepareRemoval(101, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(m.removalPath(101), []byte("corrupt"), 0600); err != nil {
@@ -162,20 +162,20 @@ func TestUnreadableRemovalStateFailsClosed(t *testing.T) {
 	if !m.RemovalPending(101) {
 		t.Fatal("corrupt marker ignored")
 	}
-	if _, err := m.PrepareRemoval(101); err == nil {
+	if _, err := m.PrepareRemoval(101, false); err == nil {
 		t.Fatal("corrupt ownership state allowed destructive retry")
 	}
 }
 
 func TestNullRemovalCategoryFailsClosed(t *testing.T) {
 	m := newManagerForTest(t, &fakeClient{})
-	if _, err := m.PrepareRemoval(101); err != nil {
+	if _, err := m.PrepareRemoval(101, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(m.removalPath(101), []byte("null"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.PrepareRemoval(101); err == nil {
+	if _, err := m.PrepareRemoval(101, false); err == nil {
 		t.Fatal("null ownership category allowed destructive retry")
 	}
 }

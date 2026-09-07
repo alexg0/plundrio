@@ -116,6 +116,7 @@ func TestGetTransfersIsRaceFreeWithCheckTransfers(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+	m.processorWg.Wait()
 
 	// Only transfers in the configured folder are published.
 	got := m.GetTransfers()
@@ -141,6 +142,7 @@ func TestGetTransfersReturnsCopy(t *testing.T) {
 	}
 	m := newManagerForTest(t, client)
 	m.processor.checkTransfers()
+	m.processorWg.Wait()
 
 	first := m.GetTransfers()
 	if len(first) != 1 {
