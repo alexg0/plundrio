@@ -79,7 +79,7 @@ func TestRemovalDoesNotWaitForFullQueue(t *testing.T) {
 				removalDone = make(chan struct{})
 				go func() {
 					defer close(removalDone)
-					_, removalErr = m.PrepareRemoval(removedID)
+					_, removalErr = m.PrepareRemoval(removedID, false)
 				}()
 				select {
 				case <-removalDone:
@@ -91,7 +91,7 @@ func TestRemovalDoesNotWaitForFullQueue(t *testing.T) {
 				}
 				// Remove the sender as well, then let its claimed job enter the
 				// queue. Suppression must outlive the blocked channel send.
-				if _, err := m.PrepareRemoval(101); err != nil {
+				if _, err := m.PrepareRemoval(101, false); err != nil {
 					t.Fatal(err)
 				}
 				m.RemoveTransfer(101)
@@ -206,7 +206,7 @@ func TestRemovalInvalidatesBlockedRemoteListing(t *testing.T) {
 	removalDone = make(chan struct{})
 	go func() {
 		defer close(removalDone)
-		_, removalErr = m.PrepareRemoval(101)
+		_, removalErr = m.PrepareRemoval(101, false)
 	}()
 	select {
 	case <-removalDone:
