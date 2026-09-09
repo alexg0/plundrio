@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -504,6 +505,9 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 		return s.retireReviewedTransfer(ctx, params.IDs[0])
 	}
 
+	// Keep bulk removal best-effort: one transfer's safety guard or remote
+	// failure must not prevent later IDs from being attempted.
+	var removalErrors []error
 	for _, id := range params.IDs {
 		transfer, err := s.findTransfer(ctx, id)
 		if err != nil {
@@ -522,7 +526,8 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 		ready := transfer.Status == "COMPLETED" || transfer.Status == "SEEDING"
 		category, err := s.dlService.PrepareRemoval(transfer.ID, ready)
 		if err != nil {
-			return nil, fmt.Errorf("preserve removal state for transfer %d: %w", transfer.ID, err)
+			removalErrors = append(removalErrors, fmt.Errorf("preserve removal state for transfer %d: %w", transfer.ID, err))
+			continue
 		}
 		if !s.cfg.UseCategoriesTarget {
 			category = ""
@@ -561,7 +566,8 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 				Int64("transfer_id", transfer.ID).
 				Err(removalErr).
 				Msg("Failed to delete transfer")
-			return nil, fmt.Errorf("remove transfer %d after at most %d attempts; local processing suspended, retry torrent-remove: %w", transfer.ID, maxRemovalAttempts, removalErr)
+			removalErrors = append(removalErrors, fmt.Errorf("remove transfer %d after at most %d attempts; local processing suspended, retry torrent-remove: %w", transfer.ID, maxRemovalAttempts, removalErr))
+			continue
 		} else {
 			log.Info("rpc").
 				Str("operation", "torrent-remove").
@@ -593,6 +599,9 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 		s.dlService.RemoveTransfer(transfer.ID)
 	}
 
+	if err := errors.Join(removalErrors...); err != nil {
+		return nil, err
+	}
 	return struct{}{}, nil
 }
 
