@@ -422,6 +422,14 @@ func (p *TransferProcessor) processTransfer(transfer *putio.Transfer) {
 		Int64("file_id", transfer.FileID).
 		Msg("Processing transfer")
 
+	// Zero identifies Put.io's root. A cleaned transfer has no source to list.
+	if transfer.FileID == 0 {
+		if p.initializeTransfer(transfer, 0) {
+			p.manager.cleanupTransfer(transfer.ID)
+		}
+		return
+	}
+
 	files, err := p.manager.client.GetAllTransferFiles(p.manager.Context(), transfer.FileID)
 	if err != nil {
 		p.handleTransferError(transfer, err)
