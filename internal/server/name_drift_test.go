@@ -471,3 +471,96 @@ func TestManifestMalformedMultipleRootsRPCAndRemoval(t *testing.T) {
 		})
 	}
 }
+
+// With category subfolders the deletion target is TargetDir/<category>/<name>,
+// so the manifest-less ownership preflight must compare claims in that same
+// layout: a bare-name comparison would clear a root another transfer owns.
+func TestTorrentRemoveManifestlessTransferRefusesCategoryRoot(t *testing.T) {
+	root := t.TempDir()
+	writeManifestFixture(t, root, ".plundrio-files/101.json", []byte(`[{"name":"Show/ep1.mkv","length":3}]`))
+	writeManifestFixture(t, root, "tv/Show/ep1.mkv", []byte("one"))
+	writeManifestFixture(t, root, "tv/Solo/leftover.bin", []byte("old"))
+
+	cfg := &config.Config{TargetDir: root, UseCategoriesTarget: true}
+	transfers := []*putio.Transfer{
+		{ID: 101, Hash: "ABC123", Name: "Show", FileID: 501, Status: "COMPLETED", PercentDone: 100},
+		{ID: 202, Hash: "DEF456", Name: "Show", FileID: 502, Status: "DOWNLOADING"},
+		{ID: 303, Hash: "AAA789", Name: "Solo", FileID: 503, Status: "DOWNLOADING"},
+	}
+	client := &torrentAddClient{transfers: transfers}
+	manager := download.New(cfg, nil)
+	for _, id := range []int64{101, 202, 303} {
+		manager.SetCategory(id, "tv")
+	}
+	srv := &Server{cfg: cfg, client: client, dlService: &manifestRPCService{Manager: manager, transfers: transfers}}
+	before := localSnapshot(t, root)
+
+	for _, ids := range []string{``, `"ids":[101,"def456"],`} {
+		torrents := manifestRPC(t, srv, `{`+ids+`"fields":["id","name","files","error","errorString"]}`)
+		if torrents[0].Error != 0 || len(torrents[0].Files) != 1 || torrents[0].Files[0].Name != "Show/ep1.mkv" {
+			t.Fatalf("owning transfer lost its files: %+v", torrents[0])
+		}
+		if torrents[1].Error != trErrorLocal || !strings.Contains(torrents[1].ErrorString, "collides with transfer 101") || torrents[1].Files == nil || len(torrents[1].Files) != 0 {
+			t.Fatalf("manifest-less transfer claimed a categorised root: %+v", torrents[1])
+		}
+	}
+
+	_, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[202],"delete-local-data":true}`))
+	if err == nil || !strings.Contains(err.Error(), "establish local ownership for transfer 202; nothing was removed") || !strings.Contains(err.Error(), "collides with transfer 101") {
+		t.Fatalf("manifest-less removal ignored the category layout: %v", err)
+	}
+	if len(client.deleted) != 0 || len(client.deletedFiles) != 0 {
+		t.Fatalf("refused removal still mutated Put.io: transfers=%v files=%v", client.deleted, client.deletedFiles)
+	}
+	if manager.RemovalPending(202) || manager.GetCategory(202) != "tv" {
+		t.Fatalf("refused removal dropped local bookkeeping: pending=%t category=%q", manager.RemovalPending(202), manager.GetCategory(202))
+	}
+	localUnchanged(t, root, before)
+
+	// Control: an unclaimed root inside the same category is still removed.
+	if _, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[303],"delete-local-data":true}`)); err != nil {
+		t.Fatalf("manifest-less removal of an unclaimed categorised root refused: %v", err)
+	}
+	if len(client.deleted) != 1 || client.deleted[0] != 303 {
+		t.Fatalf("unclaimed removal did not delete the remote transfer: %v", client.deleted)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "tv/Solo")); !os.IsNotExist(err) {
+		t.Fatalf("unclaimed local root survived removal: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "tv/Show/ep1.mkv")); err != nil || string(data) != "one" {
+		t.Fatalf("removal touched the owned root: %q %v", data, err)
+	}
+}
+
+// A remote name that resolves nowhere inside the download root cannot be shown
+// to own anything, so the whole request is refused before the remote records
+// are deleted rather than after, when only the local step could still fail.
+func TestTorrentRemoveManifestlessUnsafeNameRefusesEverything(t *testing.T) {
+	for _, name := range []string{"", ".", "../escape", ".plundrio-files"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writeManifestFixture(t, root, ".plundrio-files/101.json", []byte(`{`))
+			writeManifestFixture(t, root, "keep/file.epub", []byte("keep"))
+
+			cfg := &config.Config{TargetDir: root, UseCategoriesTarget: true}
+			transfers := []*putio.Transfer{{ID: 202, Hash: "DEF456", Name: name, FileID: 502, Status: "DOWNLOADING"}}
+			client := &torrentAddClient{transfers: transfers}
+			manager := download.New(cfg, nil)
+			manager.SetCategory(202, "tv")
+			srv := &Server{cfg: cfg, client: client, dlService: &manifestRPCService{Manager: manager, transfers: transfers}}
+			before := localSnapshot(t, root)
+
+			_, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[202],"delete-local-data":true}`))
+			if err == nil || !strings.Contains(err.Error(), "establish local ownership for transfer 202; nothing was removed") {
+				t.Fatalf("unsafe manifest-less name did not refuse removal: %v", err)
+			}
+			if len(client.deleted) != 0 || len(client.deletedFiles) != 0 {
+				t.Fatalf("refused removal still mutated Put.io: transfers=%v files=%v", client.deleted, client.deletedFiles)
+			}
+			if manager.RemovalPending(202) || manager.GetCategory(202) != "tv" {
+				t.Fatalf("refused removal dropped local bookkeeping: pending=%t category=%q", manager.RemovalPending(202), manager.GetCategory(202))
+			}
+			localUnchanged(t, root, before)
+		})
+	}
+}

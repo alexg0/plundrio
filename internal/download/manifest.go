@@ -155,11 +155,11 @@ type TransferFileReader interface {
 }
 
 type manifestSnapshot struct {
-	targetDir  string
-	manifests  map[int64]LocalManifest
-	categories map[int64]string
-	errors     map[int64]error
-	scanErr    error
+	targetDir string
+	manifests map[int64]LocalManifest
+	category  func(int64) string
+	errors    map[int64]error
+	scanErr   error
 }
 
 func (m *Manager) TransferFileReader() TransferFileReader {
@@ -170,7 +170,7 @@ func (m *Manager) TransferFileReader() TransferFileReader {
 
 // Caller holds transferFiles.mu, including across publication of a new claim.
 func (m *Manager) readManifests() *manifestSnapshot {
-	snapshot := &manifestSnapshot{targetDir: m.cfg.TargetDir, manifests: make(map[int64]LocalManifest), categories: make(map[int64]string), errors: make(map[int64]error)}
+	snapshot := &manifestSnapshot{targetDir: m.cfg.TargetDir, manifests: make(map[int64]LocalManifest), category: m.localCategory, errors: make(map[int64]error)}
 	root, err := os.OpenRoot(m.cfg.TargetDir)
 	if os.IsNotExist(err) {
 		return snapshot
@@ -216,7 +216,6 @@ func (m *Manager) readManifests() *manifestSnapshot {
 			continue
 		}
 		snapshot.manifests[id] = manifest
-		snapshot.categories[id] = m.localCategory(id)
 	}
 	return snapshot
 }
@@ -234,14 +233,15 @@ func (s *manifestSnapshot) GetTransferManifest(transfer *putio.Transfer, check M
 
 // deletionCandidate is the directory a manifest-less removal would delete: the
 // transfer's remote name resolved under the download root, exactly as
-// deleteLocalData resolves it. A name that cannot land inside the root deletes
-// nothing and therefore claims nothing.
-func (s *manifestSnapshot) deletionCandidate(name string) (string, bool) {
+// deleteLocalData resolves it. A name that cannot land there is refused rather
+// than passed through, so ownership never reads clean for a name nothing can
+// establish a boundary for.
+func (s *manifestSnapshot) deletionCandidate(name string) (string, error) {
 	rel, err := filepath.Rel(s.targetDir, filepath.Join(s.targetDir, filepath.FromSlash(name)))
 	if err != nil || !safeManifestPath(rel) || IsReservedTransferName(strings.Split(rel, string(filepath.Separator))[0]) {
-		return "", false
+		return "", fmt.Errorf("unsafe transfer name %q", name)
 	}
-	return rel, true
+	return rel, nil
 }
 
 func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest LocalManifest, check ManifestCheck) (LocalManifest, error) {
@@ -259,7 +259,7 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 	if err != nil {
 		return manifest, err
 	}
-	category := s.categories[transfer.ID]
+	category := s.category(transfer.ID)
 	if category != "" && !safeManifestPath(category) {
 		return manifest, fmt.Errorf("unsafe manifest category %q", category)
 	}
@@ -270,9 +270,9 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 	// not ownership evidence, so it must clear every other record's claim and
 	// the same confinement and symlink checks before it can be used.
 	if !owned {
-		candidate, deletable := s.deletionCandidate(transfer.Name)
-		if !deletable {
-			return manifest, nil
+		candidate, err := s.deletionCandidate(transfer.Name)
+		if err != nil {
+			return manifest, err
 		}
 		claim, localRoot = candidate, filepath.Join(category, candidate)
 	}
@@ -342,7 +342,7 @@ func (s *manifestSnapshot) checkManifestCollision(id int64, root string) error {
 		if otherID == id || len(other.Files) == 0 {
 			continue
 		}
-		category := s.categories[otherID]
+		category := s.category(otherID)
 		if category != "" && !safeManifestPath(category) {
 			return fmt.Errorf("unsafe category for manifest %d", otherID)
 		}
@@ -395,7 +395,6 @@ func (m *Manager) prepareManifest(transfer *putio.Transfer, files []*putio.File)
 	}
 	local := *transfer
 	snapshot := m.readManifests()
-	snapshot.categories[transfer.ID] = m.localCategory(transfer.ID)
 	if len(stored.Files) > 0 {
 		if stored.LocalRoot == "" {
 			stored.LocalRoot, err = legacyManifestRoot(stored.Files, files)

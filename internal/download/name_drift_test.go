@@ -516,3 +516,76 @@ func TestManifestNameDriftManifestlessTransferClaimsNothing(t *testing.T) {
 	}
 	driftUnchanged(t, m.cfg.TargetDir, before)
 }
+
+// The deletion candidate of a manifest-less transfer lives under the same
+// category its removal would delete from, so it must be compared against other
+// records in that layout instead of as a bare name at the download root.
+func TestManifestNameDriftManifestlessClaimUsesCategory(t *testing.T) {
+	m := newManagerForTest(t, nil)
+	m.cfg.UseCategoriesTarget = true
+	m.SetCategory(101, "tv")
+	m.SetCategory(202, "tv")
+	m.SetCategory(303, "movies")
+	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", `[{"name":"Show/ep1.mkv","length":3}]`)
+	driftWrite(t, m.cfg.TargetDir, "tv/Show/ep1.mkv", "one")
+	driftWrite(t, m.cfg.TargetDir, "movies/Show/feature.mkv", "two")
+	before := driftSnapshot(t, m.cfg.TargetDir)
+	for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+		manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 202, Name: "Show"}, check)
+		if err == nil || !strings.Contains(err.Error(), "collides with transfer 101") {
+			t.Fatalf("check %d: manifest-less claim ignored the category: %+v %v", check, manifest, err)
+		}
+		if manifest.LocalRoot != "" {
+			t.Fatalf("check %d: refused transfer reported ownership %q", check, manifest.LocalRoot)
+		}
+		// The same name in another category is a different directory.
+		if manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 303, Name: "Show"}, check); err != nil || manifest.LocalRoot != "" {
+			t.Fatalf("check %d: unrelated category failed closed: %+v %v", check, manifest, err)
+		}
+	}
+	driftUnchanged(t, m.cfg.TargetDir, before)
+}
+
+// The category component is part of the validated path, so a category that is
+// a symlink is refused before it can be walked into.
+func TestManifestNameDriftManifestlessCategorySymlink(t *testing.T) {
+	m := newManagerForTest(t, nil)
+	m.cfg.UseCategoriesTarget = true
+	m.SetCategory(202, "tv")
+	driftWrite(t, m.cfg.TargetDir, "outside/Show/ep1.mkv", "one")
+	if err := os.Symlink(filepath.Join(m.cfg.TargetDir, "outside"), filepath.Join(m.cfg.TargetDir, "tv")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	before := driftSnapshot(t, m.cfg.TargetDir)
+	manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 202, Name: "Show"}, ManifestCheckProcessed)
+	if err == nil || !strings.Contains(err.Error(), "symlink in manifest path") {
+		t.Fatalf("symlinked category accepted: %+v %v", manifest, err)
+	}
+	driftUnchanged(t, m.cfg.TargetDir, before)
+}
+
+// A remote name that cannot resolve to a directory inside the download root
+// establishes no boundary at all, so it is refused instead of reading clean and
+// skipping the ownership inventory.
+func TestManifestNameDriftManifestlessUnsafeName(t *testing.T) {
+	for _, name := range []string{"", ".", "../escape", ".plundrio-files", "/"} {
+		t.Run(name, func(t *testing.T) {
+			for _, corrupt := range []bool{false, true} {
+				m := newManagerForTest(t, nil)
+				if corrupt {
+					driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", `{`)
+				}
+				driftWrite(t, m.cfg.TargetDir, "keep/file.epub", "keep")
+				before := driftSnapshot(t, m.cfg.TargetDir)
+				manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 202, Name: name}, ManifestCheckProcessed)
+				if err == nil {
+					t.Fatalf("corrupt=%t: unsafe name read clean: %+v", corrupt, manifest)
+				}
+				if manifest.LocalRoot != "" {
+					t.Fatalf("corrupt=%t: refused transfer reported ownership %q", corrupt, manifest.LocalRoot)
+				}
+				driftUnchanged(t, m.cfg.TargetDir, before)
+			}
+		})
+	}
+}

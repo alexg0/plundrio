@@ -566,9 +566,13 @@ inferred — a current remote name equal to `old-root` or to `old-root/book` is
 display metadata, never proof. Refusal reports `error=3` with an
 `ambiguous legacy manifest root below "old-root"` explanation, deletes and moves
 nothing, and leaves the manifest byte-identical; `reconcile` fails closed for
-that run rather than treating the files as unmanaged. Repair one such record by
-writing a version-1 object with an explicit `localRoot`, or let a source-present
-retry reconstruct the exact root from the remote listing. An ambiguous record
+that run rather than treating the files as unmanaged. Repairing one such record
+means replacing it with a version-1 object whose `localRoot` you have verified
+against the files on disk; plundrio never rewrites a legacy array for you. A
+source-present retry can reconstruct the exact root from the complete remote
+listing, but only for that download attempt: the reconstruction is not written
+back into the legacy array, so later `torrent-get`, removal and `reconcile`
+reads of that record stay ambiguous. An ambiguous record
 still blocks any other transfer from claiming the same directory, and unrelated
 transfers keep working. Reported `files` names are never rewritten, and
 `downloadDir` plus the reported name still contains them.
@@ -601,7 +605,9 @@ the case where the import took the last child and removed the owned root itself.
 That tolerance is limited to an unchanged remote name in the process that
 performed the download: once the name has drifted, the root must exist, and a
 restarted instance that no longer tracks the transfer requires every recorded
-file at its exact length. Removing a transfer whose root was never created —
+file at its exact length. A first download whose remote name is not already a
+clean relative path — a trailing separator, `./x`, `a//b` — is refused the same
+way until the name settles; no substitute root is created for it. Removing a transfer whose root was never created —
 queued or cancelled before the first local byte, name unchanged — deletes the
 remote records and nothing locally, and never creates a substitute root.
 Ownership, collision, confinement and symlink checks stay strict in every mode. No missing
@@ -611,12 +617,18 @@ separate.
 
 A transfer with no manifest owns nothing, but `torrent-remove` with
 `delete-local-data` still falls back to deleting the directory its current
-remote name points at. That candidate path is validated exactly like a recorded
-root before anything is removed, remotely or locally: an absent manifest is not
-ownership proof, so a name resolving onto a directory another transfer's
-manifest claims — including category ancestors and case-only aliases — refuses
-the whole request with `nothing was removed`, naming the conflicting transfer ID
-and root, and preserves every record and payload. A name that claims nothing is
+remote name points at. That candidate path is resolved under the transfer's own
+category — the exact directory the deletion would target, `TargetDir/<category>/<name>` —
+and then validated exactly like a recorded root before anything is removed,
+remotely or locally: an absent manifest is not ownership proof, so a name
+resolving onto a directory another transfer's manifest claims — including
+category ancestors and case-only aliases — refuses the whole request with
+`nothing was removed`, naming the conflicting transfer ID and root, and
+preserves every remote record, category, manifest and payload. A name that
+cannot resolve to a directory inside the download root at all (empty, `.`,
+traversing outside it, or a reserved state name) proves no boundary either and
+is refused the same way, instead of deleting the remote records first and
+failing only on the local step. A name that claims nothing is
 still removed as before. Two transfers with duplicate or overlapping names need
 operator resolution — remove or rename one side, or write an explicit
 `localRoot` — since plundrio never renames directories, reassigns ownership or
@@ -666,7 +678,9 @@ removal refused with zero mutations when a legacy root is ambiguous (including
 when the remote was renamed to the parent directory), removal of a transfer
 queued before its first local byte, removal refused with zero mutations for a
 manifest-less transfer whose remote name resolves onto another transfer's owned
-root (with the unclaimed-name control that still removes), a malformed record
+root — with and without `UseCategoriesTarget`, including the symlinked-category
+case — and for one whose name resolves nowhere inside the download root (with
+the unclaimed-name and unrelated-category controls that still remove), a malformed record
 holding several local roots failing closed for every transfer reachable through
 them in both entry orders, post-import metadata retention with its drifted-name
 and restart counter-cases, and reconciliation of drifted and orphaned ownership
