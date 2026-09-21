@@ -128,7 +128,7 @@ func TestManifestNameDriftSafety(t *testing.T) {
 				tc.setup(t, m)
 			}
 			before := driftSnapshot(t, m.cfg.TargetDir)
-			manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "new-root"}, true)
+			manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "new-root"}, ManifestCheckComplete)
 			if tc.wantErr == "" {
 				if err != nil || manifest.TransferID != 101 || manifest.RemoteName != "new-root" || manifest.LocalRoot == "new-root" || len(manifest.Files) != 1 {
 					t.Fatalf("manifest = %+v, err = %v", manifest, err)
@@ -158,8 +158,10 @@ func TestManifestNameDriftRejectsSymlinks(t *testing.T) {
 				t.Fatal(err)
 			}
 			before, outside := driftSnapshot(t, m.cfg.TargetDir), driftSnapshot(t, external)
-			if _, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "new-root"}, true); err == nil || !strings.Contains(err.Error(), "symlink") {
-				t.Fatalf("error = %v", err)
+			for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+				if _, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "new-root"}, check); err == nil || !strings.Contains(err.Error(), "symlink") {
+					t.Fatalf("check %d: error = %v", check, err)
+				}
 			}
 			driftUnchanged(t, m.cfg.TargetDir, before)
 			driftUnchanged(t, external, outside)
@@ -171,7 +173,7 @@ func TestManifestNameDriftDoesNotAdoptUnmanagedFiles(t *testing.T) {
 	m := newManagerForTest(t, nil)
 	driftWrite(t, m.cfg.TargetDir, "new-root/book/file.epub", "book")
 	before := driftSnapshot(t, m.cfg.TargetDir)
-	manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "new-root"}, true)
+	manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "new-root"}, ManifestCheckComplete)
 	if err != nil || len(manifest.Files) != 0 || manifest.LocalRoot != "" {
 		t.Fatalf("unmanaged files adopted: %+v %v", manifest, err)
 	}
@@ -236,7 +238,11 @@ func TestManifestNameDriftPollAndRestart(t *testing.T) {
 					t.Fatalf("%s: context=%+v", phase, ctx)
 				}
 				transfer := m.GetTransfers()[0]
-				manifest, err := m.GetTransferManifest(transfer, complete)
+				check := ManifestCheckPending
+				if complete {
+					check = ManifestCheckComplete
+				}
+				manifest, err := m.GetTransferManifest(transfer, check)
 				if err != nil || manifest.LocalRoot != "old-root" || manifest.RemoteName != currentName {
 					t.Fatalf("%s: manifest=%+v err=%v", phase, manifest, err)
 				}
@@ -285,7 +291,7 @@ func TestManifestNameDriftPreservesExplicitRoot(t *testing.T) {
 	if err != nil || local.Name != "old-root/nested" {
 		t.Fatalf("restart destination = %+v, err=%v", local, err)
 	}
-	manifest, err := restarted.GetTransferManifest(transfer, true)
+	manifest, err := restarted.GetTransferManifest(transfer, ManifestCheckComplete)
 	if err != nil || manifest.RemoteName != "new-root" || !reflect.DeepEqual(manifest.Files, stored.Files) {
 		t.Fatalf("restart manifest = %+v, err=%v", manifest, err)
 	}
@@ -344,7 +350,7 @@ func TestManifestNameDriftStoredHash(t *testing.T) {
 	driftWrite(t, m.cfg.TargetDir, "old-root/book/file.epub", "book")
 	before := driftSnapshot(t, m.cfg.TargetDir)
 	for _, hash := range []string{"abc123", "other-hash"} {
-		_, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "new-root", Hash: hash}, true)
+		_, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "new-root", Hash: hash}, ManifestCheckComplete)
 		if hash == "abc123" && err != nil {
 			t.Fatal(err)
 		}
@@ -367,11 +373,11 @@ func TestManifestNameDriftInitialDownloadWithoutRoot(t *testing.T) {
 			if _, err := m.prepareManifest(transfer, []*putio.File{{ID: 11, Name: "file.epub", Size: 4}}); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := m.GetTransferManifest(transfer, false); err != nil {
+			if _, err := m.GetTransferManifest(transfer, ManifestCheckPending); err != nil {
 				t.Fatalf("pending unchanged-name transfer: %v", err)
 			}
 			transfer.Name = "new-root"
-			if _, err := m.GetTransferManifest(transfer, false); err == nil {
+			if _, err := m.GetTransferManifest(transfer, ManifestCheckPending); err == nil {
 				t.Fatal("name drift silently accepted missing local root")
 			}
 		})

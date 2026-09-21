@@ -558,17 +558,36 @@ Readers pair that local root with the latest poll's remote name without changing
 the ownership record. Legacy arrays must contain a single safe top-level root.
 For source-present retries, the complete remote file list must match the stored
 names and sizes; this also recovers nested legacy roots without using the current
-display name. The stored file order is retained.
+display name. The stored file order is retained. A mismatch refuses the retry
+for the whole listing instead of downloading an intersection, and that refusal is
+not persisted: restoring the complete original listing on Put.io clears it on the
+next poll. Retry bookkeeping is in-memory only, so a restart also re-attempts a
+transfer whose remote listing has since been restored.
 
 Reconciliation rejects missing roots after name drift, duplicate or malformed
 entries, traversal, symlinks in state or payload paths, and competing root claims
 (including category ancestors and case-only aliases). Incomplete downloads may
 have missing/partial files; completed restoration requires every recorded file
 to be regular and exactly the expected length. Size checks do not prove content
-integrity. A corrupt competing ownership record can also prevent reconciliation
-because its claim cannot safely be excluded. No missing manifest is reconstructed
-by scanning the download directory, and no files are moved or deleted by these
-checks. Existing review and removal operations remain separate.
+integrity. A transfer this instance already processed keeps reporting its stored
+metadata while its local root is present, since an Arr import renames, moves or
+truncates the payload; root presence, ownership, confinement and symlink checks
+stay strict, and a cleaned restart still requires every recorded file. No missing
+manifest is reconstructed by scanning the download directory, and no files are
+moved or deleted by these checks. Existing review and removal operations remain
+separate.
+
+### Corrupt manifest ownership
+
+An unreadable or malformed `.plundrio-files/<id>.json` still claims a local root,
+and that claim cannot safely be excluded. Ownership therefore fails closed: while
+such a file exists, `torrent-get` file listings, local-data deletion and
+reconciliation are refused for every transfer in that download root, not only
+the corrupt one. The
+error names the lowest-numbered unreadable manifest and names the same one on
+every read, so repeated requests point at one record to repair or remove rather
+than at whichever one a map iteration surfaced. Fixing or deleting that file
+restores the others; nothing is reconstructed or deleted automatically.
 
 An unsafe manifest produces an empty `files` array, stopped status, disabled
 automatic seed-idle removal, and the standard per-torrent `error=3` with an

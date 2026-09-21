@@ -74,7 +74,7 @@ func (d *mockDownloadService) GetTransferContext(transferID int64) (*download.Tr
 	return nil, false
 }
 
-func (d *mockDownloadService) GetTransferManifest(transfer *putio.Transfer, complete bool) (download.LocalManifest, error) {
+func (d *mockDownloadService) GetTransferManifest(transfer *putio.Transfer, _ download.ManifestCheck) (download.LocalManifest, error) {
 	return download.LocalManifest{}, nil
 }
 

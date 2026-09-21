@@ -322,11 +322,11 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 		Int("all_transfers_count", len(transfers)).
 		Msg("Retrieved all transfers from processor")
 
-	// Convert Put.io transfers to transmission format
-	var fileReader download.TransferFileReader
-	if slices.Contains(params.Fields, "files") {
-		fileReader = s.dlService.TransferFileReader()
-	}
+	// Convert Put.io transfers to transmission format. One ownership snapshot
+	// serves the whole response; the reported name and file list must agree
+	// even when the caller did not ask for files.
+	fileReader := s.dlService.TransferFileReader()
+	wantFiles := slices.Contains(params.Fields, "files")
 	torrents := make([]map[string]interface{}, 0, len(transfers))
 	for _, t := range transfers {
 		// Filter by IDs if specified
@@ -365,6 +365,22 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 			seedIdleMode = transmissionLimitModeSingle
 			secondsSeeding = 1
 		}
+		// Arr derives a completed download's output path from downloadDir and
+		// the reported name, so the name must be the locally owned root rather
+		// than the latest remote display name.
+		check := download.ManifestCheckPending
+		switch {
+		case transferCtx != nil && transferCtx.GetState() == download.TransferLifecycleProcessed:
+			check = download.ManifestCheckProcessed
+		case percentDone >= 1:
+			check = download.ManifestCheckComplete
+		}
+		manifest, manifestErr := fileReader.GetTransferManifest(t, check)
+		localName := t.Name
+		if manifestErr == nil && manifest.LocalRoot != "" {
+			localName = filepath.ToSlash(manifest.LocalRoot)
+		}
+
 		errorCode := trErrorNone
 		errorString := t.ErrorMessage
 		if transferCtx != nil {
@@ -398,7 +414,7 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 		torrentInfo := map[string]interface{}{
 			"id":             t.ID,
 			"hashString":     t.Hash,
-			"name":           t.Name,
+			"name":           localName,
 			"eta":            eta,
 			"status":         status,
 			"downloadDir":    filepath.Join(s.cfg.TargetDir, s.localCategory(t.ID)),
@@ -424,16 +440,18 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 			"errorString": errorString,
 		}
 
-		if slices.Contains(params.Fields, "files") {
-			files, err := s.localTorrentFiles(fileReader, t, percentDone >= 1)
-			if err != nil {
-				torrentInfo["error"] = trErrorLocal
-				torrentInfo["errorString"] = fmt.Sprintf("list local files for transfer %d: %v", t.ID, err)
-				torrentInfo["status"] = trStatusStopped
-				torrentInfo["seedIdleMode"] = transmissionLimitModeUnlimited
-				torrentInfo["rateDownload"] = 0
-				torrentInfo["rateUpload"] = 0
-				files = []transmissionFile{}
+		if manifestErr != nil {
+			torrentInfo["error"] = trErrorLocal
+			torrentInfo["errorString"] = fmt.Sprintf("list local files for transfer %d: %v", t.ID, manifestErr)
+			torrentInfo["status"] = trStatusStopped
+			torrentInfo["seedIdleMode"] = transmissionLimitModeUnlimited
+			torrentInfo["rateDownload"] = 0
+			torrentInfo["rateUpload"] = 0
+		}
+		if wantFiles {
+			files := []transmissionFile{}
+			if manifestErr == nil {
+				files = localTorrentFiles(manifest, check != download.ManifestCheckPending)
 			}
 			torrentInfo["files"] = files
 		}
@@ -493,11 +511,7 @@ type transmissionFile struct {
 
 // localTorrentFiles returns the transfer-ID-keyed manifest. Names are relative
 // to downloadDir, matching Transmission's files contract.
-func (s *Server) localTorrentFiles(reader download.TransferFileReader, transfer *putio.Transfer, complete bool) ([]transmissionFile, error) {
-	manifest, err := reader.GetTransferManifest(transfer, complete)
-	if err != nil {
-		return nil, err
-	}
+func localTorrentFiles(manifest download.LocalManifest, complete bool) []transmissionFile {
 	files := make([]transmissionFile, 0, len(manifest.Files))
 	for _, file := range manifest.Files {
 		var bytesCompleted int64
@@ -512,7 +526,7 @@ func (s *Server) localTorrentFiles(reader download.TransferFileReader, transfer 
 			Name:           file.Name,
 		})
 	}
-	return files, nil
+	return files
 }
 
 // handleTorrentRemove processes torrent-remove requests
@@ -562,6 +576,19 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 			category = ""
 		}
 
+		// Resolve ownership before remote mutation: the removal marker still
+		// carries the category and the manifest still records the local root
+		// this transfer owns, which a drifted remote name no longer names.
+		localRoot := transfer.Name
+		var manifestErr error
+		if params.DeleteLocalData {
+			var manifest download.LocalManifest
+			manifest, manifestErr = s.dlService.TransferFileReader().GetTransferManifest(transfer, download.ManifestCheckProcessed)
+			if manifest.LocalRoot != "" {
+				localRoot = manifest.LocalRoot
+			}
+		}
+
 		// Seeding-only transfers (where the file was already deleted) have no
 		// file_id. Calling DeleteFile(0) would target the root folder and
 		// cascade-delete everything in the account.
@@ -608,17 +635,23 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 
 		if params.DeleteLocalData {
 			localTargetDir := filepath.Join(s.cfg.TargetDir, category)
-			if err := deleteLocalData(localTargetDir, transfer.Name); err != nil {
+			deleteErr := manifestErr
+			if deleteErr == nil {
+				deleteErr = deleteLocalData(localTargetDir, localRoot)
+			}
+			if deleteErr != nil {
 				log.Error("rpc").
 					Str("operation", "torrent-remove").
 					Str("transfer_name", transfer.Name).
+					Str("local_root", localRoot).
 					Str("category", category).
-					Err(err).
+					Err(deleteErr).
 					Msg("Failed to delete local files")
 			} else {
 				log.Info("rpc").
 					Str("operation", "torrent-remove").
 					Str("transfer_name", transfer.Name).
+					Str("local_root", localRoot).
 					Str("category", category).
 					Msg("Deleted local files")
 			}

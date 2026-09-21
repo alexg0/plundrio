@@ -382,26 +382,43 @@ func activeLocalPaths(root string, transfers []*putio.Transfer, nodes []*localNo
 	for _, rel := range pending {
 		active[rel] = struct{}{}
 	}
-	for _, transfer := range transfers {
-		category := categories[transfer.ID]
-		paths := []string{transfer.Name}
-		if category != "" {
-			paths = append(paths, filepath.Join(category, transfer.Name))
+	// A transfer's remote display name may have drifted away from the local
+	// root it actually owns. The persisted manifest is the ownership record.
+	manifestRoots, err := download.ManifestLocalRoots(root)
+	if err != nil {
+		return nil, err
+	}
+	for id, localRoot := range manifestRoots {
+		if err := protectLocalRoot(root, id, localRoot, categories[id], nodes, active); err != nil {
+			return nil, err
 		}
-		for _, rel := range paths {
-			clean, err := confinedRelativePath(root, rel)
-			if err != nil {
-				return nil, fmt.Errorf("unsafe local path for transfer %d: %w", transfer.ID, err)
-			}
-			active[clean] = struct{}{}
-			if info, err := os.Stat(filepath.Join(root, clean)); err == nil {
-				collectSameLocalFiles(nodes, info, active)
-			} else if !os.IsNotExist(err) {
-				return nil, fmt.Errorf("resolve active local path for transfer %d: %w", transfer.ID, err)
-			}
+	}
+	for _, transfer := range transfers {
+		if err := protectLocalRoot(root, transfer.ID, transfer.Name, categories[transfer.ID], nodes, active); err != nil {
+			return nil, err
 		}
 	}
 	return active, nil
+}
+
+func protectLocalRoot(root string, id int64, localRoot, category string, nodes []*localNode, active map[string]struct{}) error {
+	paths := []string{localRoot}
+	if category != "" {
+		paths = append(paths, filepath.Join(category, localRoot))
+	}
+	for _, rel := range paths {
+		clean, err := confinedRelativePath(root, rel)
+		if err != nil {
+			return fmt.Errorf("unsafe local path for transfer %d: %w", id, err)
+		}
+		active[clean] = struct{}{}
+		if info, err := os.Stat(filepath.Join(root, clean)); err == nil {
+			collectSameLocalFiles(nodes, info, active)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("resolve active local path for transfer %d: %w", id, err)
+		}
+	}
+	return nil
 }
 
 func collectSameLocalFiles(nodes []*localNode, target os.FileInfo, active map[string]struct{}) {

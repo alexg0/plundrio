@@ -587,7 +587,7 @@ func buildTransferFileManifest(transfer *putio.Transfer, files []*putio.File) ([
 }
 
 func (p *TransferProcessor) restoreCleanedTransfer(transfer *putio.Transfer) {
-	manifest, err := p.manager.GetTransferManifest(transfer, true)
+	manifest, err := p.manager.GetTransferManifest(transfer, ManifestCheckComplete)
 	if err != nil {
 		p.failCleanedTransfer(transfer, err)
 		return

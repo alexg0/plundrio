@@ -47,10 +47,6 @@ func (fs *TransferFileStore) path(transferID int64) string {
 func (fs *TransferFileStore) Set(transferID int64, files []TransferFile) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	return fs.set(transferID, files)
-}
-
-func (fs *TransferFileStore) set(transferID int64, files []TransferFile) error {
 	if transferID <= 0 || len(files) == 0 {
 		return fmt.Errorf("transfer file manifest requires a transfer ID and at least one file")
 	}

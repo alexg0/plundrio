@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -20,14 +21,6 @@ type LocalManifest struct {
 	LocalRoot  string         `json:"localRoot"`
 	RemoteName string         `json:"remoteName"`
 	Files      []TransferFile `json:"files"`
-}
-
-// ResolveManifest validates the complete ID-keyed file list without consulting
-// mutable remote naming. Filesystem confinement and ownership are checked by
-// Manager.GetTransferManifest before this result is used by the RPC server.
-func ResolveManifest(id int64, remoteName string, files []TransferFile) (LocalManifest, error) {
-	manifest := LocalManifest{TransferID: id, RemoteName: remoteName, Files: files}
-	return manifest.resolve()
 }
 
 func (manifest LocalManifest) resolve() (LocalManifest, error) {
@@ -66,16 +59,32 @@ func safeManifestPath(path string) bool {
 	return path != "." && filepath.IsLocal(path) && filepath.Clean(path) == path && !strings.ContainsAny(path, "\\\x00")
 }
 
+// ManifestCheck selects how much local evidence a manifest read requires.
+// Ownership, confinement and symlink rejection are enforced in every mode.
+type ManifestCheck int
+
+const (
+	// ManifestCheckPending tolerates a transfer whose local copy is still
+	// being written, including a root that does not exist yet.
+	ManifestCheckPending ManifestCheck = iota
+	// ManifestCheckProcessed reports historical metadata for a transfer this
+	// instance already downloaded. The stored root must still be present, but
+	// individual child payloads may have been imported, renamed or resized.
+	ManifestCheckProcessed
+	// ManifestCheckComplete requires every manifest file at its exact length.
+	ManifestCheckComplete
+)
+
 // GetTransferManifest is read-only: an absent manifest never authorizes a scan
 // or adoption, and a corrupt manifest is an error rather than absence.
-func (m *Manager) GetTransferManifest(transfer *putio.Transfer, complete bool) (LocalManifest, error) {
-	return m.TransferFileReader().GetTransferManifest(transfer, complete)
+func (m *Manager) GetTransferManifest(transfer *putio.Transfer, check ManifestCheck) (LocalManifest, error) {
+	return m.TransferFileReader().GetTransferManifest(transfer, check)
 }
 
 // TransferFileReader keeps one ownership snapshot for a files-inclusive RPC,
 // avoiding a full disk scan for every torrent in the response.
 type TransferFileReader interface {
-	GetTransferManifest(*putio.Transfer, bool) (LocalManifest, error)
+	GetTransferManifest(*putio.Transfer, ManifestCheck) (LocalManifest, error)
 }
 
 type manifestSnapshot struct {
@@ -145,7 +154,7 @@ func (m *Manager) readManifests() *manifestSnapshot {
 	return snapshot
 }
 
-func (s *manifestSnapshot) GetTransferManifest(transfer *putio.Transfer, complete bool) (LocalManifest, error) {
+func (s *manifestSnapshot) GetTransferManifest(transfer *putio.Transfer, check ManifestCheck) (LocalManifest, error) {
 	if err := s.errors[transfer.ID]; err != nil {
 		return LocalManifest{}, err
 	}
@@ -153,10 +162,10 @@ func (s *manifestSnapshot) GetTransferManifest(transfer *putio.Transfer, complet
 	if !exists {
 		manifest.TransferID = transfer.ID
 	}
-	return s.validateManifest(transfer, manifest, complete)
+	return s.validateManifest(transfer, manifest, check)
 }
 
-func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest LocalManifest, complete bool) (LocalManifest, error) {
+func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest LocalManifest, check ManifestCheck) (LocalManifest, error) {
 	if s.scanErr != nil {
 		return manifest, s.scanErr
 	}
@@ -179,7 +188,7 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 		return manifest, err
 	}
 	root, err := os.OpenRoot(s.targetDir)
-	if os.IsNotExist(err) && !complete && manifest.LocalRoot == transfer.Name {
+	if os.IsNotExist(err) && check == ManifestCheckPending && manifest.LocalRoot == transfer.Name {
 		return manifest, nil // The ordinary first download creates the target.
 	}
 	if err != nil {
@@ -188,12 +197,13 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 	defer root.Close()
 	// A newly queued unchanged-name transfer may not have created its root yet.
 	// Name drift requires an existing root; never create a replacement for it.
-	rootRequired := complete || manifest.LocalRoot != transfer.Name
-	if err := checkManifestPath(root, localRoot, true, rootRequired, 0, false); err != nil {
+	rootRequired := check != ManifestCheckPending || manifest.LocalRoot != transfer.Name
+	if err := checkManifestPath(root, localRoot, true, rootRequired, 0, check); err != nil {
 		return manifest, err
 	}
 	for _, file := range manifest.Files {
-		if err := checkManifestPath(root, filepath.Join(category, filepath.FromSlash(file.Name)), false, complete, file.Length, complete); err != nil {
+		required := check == ManifestCheckComplete
+		if err := checkManifestPath(root, filepath.Join(category, filepath.FromSlash(file.Name)), false, required, file.Length, check); err != nil {
 			return manifest, err
 		}
 	}
@@ -202,7 +212,7 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 
 // Reject symlinks in every component, including category and transfer roots.
 // os.Root also confines each lookup if a component changes during validation.
-func checkManifestPath(root *os.Root, path string, directory, required bool, length int64, complete bool) error {
+func checkManifestPath(root *os.Root, path string, directory, required bool, length int64, check ManifestCheck) error {
 	parts := strings.Split(path, string(filepath.Separator))
 	for i := range parts {
 		component := filepath.Join(parts[:i+1]...)
@@ -220,7 +230,9 @@ func checkManifestPath(root *os.Root, path string, directory, required bool, len
 			if !info.IsDir() {
 				return fmt.Errorf("manifest root %q is not a directory", component)
 			}
-		} else if !info.Mode().IsRegular() || info.Size() > length || (complete && info.Size() != length) {
+		} else if !info.Mode().IsRegular() {
+			return fmt.Errorf("manifest file %q is not a regular file", path)
+		} else if check != ManifestCheckProcessed && (info.Size() > length || (check == ManifestCheckComplete && info.Size() != length)) {
 			return fmt.Errorf("manifest file %q does not match expected length %d", path, length)
 		}
 	}
@@ -228,10 +240,12 @@ func checkManifestPath(root *os.Root, path string, directory, required bool, len
 }
 
 func (s *manifestSnapshot) checkManifestCollision(id int64, root string) error {
-	for otherID, err := range s.errors {
-		return fmt.Errorf("cannot establish ownership: manifest %d: %w", otherID, err)
+	if len(s.errors) > 0 {
+		lowest := sortedManifestIDs(s.errors)[0]
+		return fmt.Errorf("cannot establish ownership: manifest %d: %w", lowest, s.errors[lowest])
 	}
-	for otherID, other := range s.manifests {
+	for _, otherID := range sortedManifestIDs(s.manifests) {
+		other := s.manifests[otherID]
 		if otherID == id || len(other.Files) == 0 {
 			continue
 		}
@@ -248,6 +262,49 @@ func (s *manifestSnapshot) checkManifestCollision(id int64, root string) error {
 		}
 	}
 	return nil
+}
+
+// Ownership diagnostics must name the same competing record on every read,
+// so an operator can resolve a blocking manifest instead of chasing whichever
+// one map iteration happened to surface.
+func sortedManifestIDs[V any](m map[int64]V) []int64 {
+	ids := make([]int64, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// ManifestLocalRoots reports the local root each persisted manifest owns.
+// Reconciliation needs this to keep a transfer whose remote name has drifted
+// from being classified as unmanaged local data. Unreadable ownership evidence
+// fails closed rather than silently shrinking the protected set.
+func ManifestLocalRoots(targetDir string) (map[int64]string, error) {
+	store := newTransferFileStore(targetDir)
+	entries, err := os.ReadDir(store.stateDir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read manifest ownership: %w", err)
+	}
+	roots := make(map[int64]string, len(entries))
+	for _, entry := range entries {
+		id, err := strconv.ParseInt(strings.TrimSuffix(entry.Name(), ".json"), 10, 64)
+		if err != nil || id <= 0 || entry.Name() != strconv.FormatInt(id, 10)+".json" {
+			continue
+		}
+		manifest, err := store.loadManifest(id)
+		if err == nil {
+			manifest, err = manifest.resolve()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("manifest ownership for transfer %d: %w", id, err)
+		}
+		roots[id] = manifest.LocalRoot
+	}
+	return roots, nil
 }
 
 // prepareManifest retains an existing claim across retries/restarts. A changed
@@ -269,7 +326,7 @@ func (m *Manager) prepareManifest(transfer *putio.Transfer, files []*putio.File)
 				return nil, err
 			}
 		}
-		manifest, err := snapshot.validateManifest(transfer, stored, false)
+		manifest, err := snapshot.validateManifest(transfer, stored, ManifestCheckPending)
 		if err != nil {
 			return nil, err
 		}
@@ -294,7 +351,7 @@ func (m *Manager) prepareManifest(transfer *putio.Transfer, files []*putio.File)
 		}
 	} else {
 		manifest := LocalManifest{TransferID: transfer.ID, Hash: transfer.Hash, LocalRoot: filepath.Clean(transfer.Name), RemoteName: transfer.Name, Files: expected}
-		if _, err := snapshot.validateManifest(&local, manifest, false); err != nil {
+		if _, err := snapshot.validateManifest(&local, manifest, ManifestCheckPending); err != nil {
 			return nil, err
 		}
 		if err := m.transferFiles.setManifest(manifest); err != nil {
