@@ -136,7 +136,7 @@ func TestManifestNameDriftSafety(t *testing.T) {
 			before := driftSnapshot(t, m.cfg.TargetDir)
 			manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "new-root"}, ManifestCheckComplete)
 			if tc.wantErr == "" {
-				if err != nil || manifest.TransferID != 101 || manifest.RemoteName != "new-root" || manifest.LocalRoot == "new-root" || len(manifest.Files) != 1 {
+				if err != nil || manifest.TransferID != 101 || manifest.LocalRoot == "new-root" || len(manifest.Files) != 1 {
 					t.Fatalf("manifest = %+v, err = %v", manifest, err)
 				}
 			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -259,7 +259,7 @@ func TestManifestNameDriftPollAndRestart(t *testing.T) {
 					check = ManifestCheckComplete
 				}
 				manifest, err := m.GetTransferManifest(transfer, check)
-				if err != nil || manifest.LocalRoot != "old-root" || manifest.RemoteName != currentName {
+				if err != nil || manifest.LocalRoot != "old-root" {
 					t.Fatalf("%s: manifest=%+v err=%v", phase, manifest, err)
 				}
 				if !complete && phase != "renamed poll" {
@@ -297,7 +297,7 @@ func TestManifestNameDriftPreservesExplicitRoot(t *testing.T) {
 	if err := json.Unmarshal(data, &stored); err != nil {
 		t.Fatal(err)
 	}
-	if stored.Version != 1 || stored.LocalRoot != transfer.Name || stored.TransferID != 101 || stored.RemoteName != transfer.Name {
+	if stored.Version != 1 || stored.LocalRoot != transfer.Name || stored.TransferID != 101 {
 		t.Fatalf("identity not explicit: %+v", stored)
 	}
 	before := driftSnapshot(t, m.cfg.TargetDir)
@@ -308,7 +308,7 @@ func TestManifestNameDriftPreservesExplicitRoot(t *testing.T) {
 		t.Fatalf("restart destination = %+v, err=%v", local, err)
 	}
 	manifest, err := restarted.GetTransferManifest(transfer, ManifestCheckComplete)
-	if err != nil || manifest.RemoteName != "new-root" || !reflect.DeepEqual(manifest.Files, stored.Files) {
+	if err != nil || !reflect.DeepEqual(manifest.Files, stored.Files) {
 		t.Fatalf("restart manifest = %+v, err=%v", manifest, err)
 	}
 	driftUnchanged(t, m.cfg.TargetDir, before)
@@ -408,7 +408,7 @@ func TestManifestNameDriftPreservesLegacyRoot(t *testing.T) {
 	driftWrite(t, m.cfg.TargetDir, "old-root/file.epub", "book")
 	before := driftSnapshot(t, m.cfg.TargetDir)
 	manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "new-root"}, ManifestCheckComplete)
-	if err != nil || manifest.LocalRoot != "old-root" || manifest.RemoteName != "new-root" || len(manifest.Files) != 1 {
+	if err != nil || manifest.LocalRoot != "old-root" || len(manifest.Files) != 1 {
 		t.Fatalf("legacy root lost across name drift: %+v %v", manifest, err)
 	}
 	driftUnchanged(t, m.cfg.TargetDir, before)
@@ -690,6 +690,82 @@ func TestManifestNameDriftRejectsNulInManifestEntry(t *testing.T) {
 	manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "AC\x00DC"}, ManifestCheckProcessed)
 	if err == nil || !strings.Contains(err.Error(), "unsafe manifest entry") {
 		t.Fatalf("NUL byte accepted in manifest entry: %+v %v", manifest, err)
+	}
+	driftUnchanged(t, m.cfg.TargetDir, before)
+}
+
+// Records written before the persisted remote name was dropped stay readable,
+// and reading them never rewrites the stored bytes.
+func TestManifestStoredRemoteNameFieldStillLoads(t *testing.T) {
+	const stored = `{"version":1,"transferId":101,"hash":"ABC123","localRoot":"old-root","remoteName":"old-root","files":[{"name":"old-root/file.epub","length":4}]}`
+	m := newManagerForTest(t, nil)
+	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", stored)
+	driftWrite(t, m.cfg.TargetDir, "old-root/file.epub", "book")
+	before := driftSnapshot(t, m.cfg.TargetDir)
+
+	transfer := &putio.Transfer{ID: 101, Name: "new-root", Hash: "ABC123"}
+	for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+		manifest, err := m.GetTransferManifest(transfer, check)
+		if err != nil || manifest.LocalRoot != "old-root" || len(manifest.Files) != 1 {
+			t.Fatalf("check %d: stored remoteName broke the read: %+v %v", check, manifest, err)
+		}
+	}
+	local, err := m.prepareManifest(transfer, []*putio.File{{ID: 11, Name: "file.epub", Size: 4}})
+	if err != nil || local.Name != "old-root" {
+		t.Fatalf("source-present poll = %+v, err=%v", local, err)
+	}
+	data, err := os.ReadFile(m.transferFiles.path(101))
+	if err != nil || string(data) != stored {
+		t.Fatalf("manifest bytes rewritten: %q %v", string(data), err)
+	}
+	driftUnchanged(t, m.cfg.TargetDir, before)
+}
+
+// The production new-download path is what rejected the literal POSIX name, so
+// initialization, persistence and a fresh reload are all exercised through it.
+func TestManifestNameDriftLiteralBackslashProductionInit(t *testing.T) {
+	const name = `AC\DC - Album`
+	const entry = `AC\DC - Album/file.mkv`
+
+	m := newManagerForTest(t, nil)
+	transfer := &putio.Transfer{ID: 101, Name: name, Hash: "ABC123"}
+	files := []*putio.File{{ID: 11, Name: "file.mkv", Size: 3}}
+	local, err := m.prepareManifest(transfer, files)
+	if err != nil {
+		t.Fatalf("literal name refused by production initialization: %v", err)
+	}
+	if local.Name != name {
+		t.Fatalf("initialization rewrote the literal name: %q", local.Name)
+	}
+	driftWrite(t, m.cfg.TargetDir, filepath.Join(name, "file.mkv"), "one")
+
+	data, err := os.ReadFile(m.transferFiles.path(101))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var written struct {
+		Version int
+		LocalManifest
+	}
+	if err := json.Unmarshal(data, &written); err != nil {
+		t.Fatal(err)
+	}
+	if written.Version != 1 || written.LocalRoot != name || len(written.Files) != 1 || written.Files[0].Name != entry {
+		t.Fatalf("current-format manifest = %+v", written)
+	}
+	before := driftSnapshot(t, m.cfg.TargetDir)
+
+	restarted := New(m.cfg, nil)
+	renamed := &putio.Transfer{ID: 101, Name: "renamed upstream", Hash: "ABC123"}
+	reloaded, err := restarted.prepareManifest(renamed, files)
+	if err != nil || reloaded.Name != name {
+		t.Fatalf("reload after drift = %+v, err=%v", reloaded, err)
+	}
+	for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+		manifest, err := restarted.GetTransferManifest(renamed, check)
+		if err != nil || manifest.LocalRoot != name || len(manifest.Files) != 1 || manifest.Files[0].Name != entry {
+			t.Fatalf("check %d: reload rewrote the literal name: %+v %v", check, manifest, err)
+		}
 	}
 	driftUnchanged(t, m.cfg.TargetDir, before)
 }

@@ -11,15 +11,15 @@ import (
 	"github.com/elsbrock/go-putio"
 )
 
-// LocalManifest separates immutable, ID-keyed ownership from the latest remote
-// display name. Legacy arrays use their single top-level directory; new
-// manifests record the processing-time root explicitly. Neither is authority
-// to adopt other files found in that directory.
+// LocalManifest records immutable, ID-keyed ownership. Legacy arrays use their
+// single top-level directory; new manifests record the processing-time root
+// explicitly. Neither is authority to adopt other files found in that
+// directory, and neither records a remote display name: the latest poll is the
+// only source for that.
 type LocalManifest struct {
 	TransferID int64          `json:"transferId"`
 	Hash       string         `json:"hash,omitempty"`
 	LocalRoot  string         `json:"localRoot"`
-	RemoteName string         `json:"remoteName"`
 	Files      []TransferFile `json:"files"`
 }
 
@@ -251,9 +251,6 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 	if manifest.Hash != "" && transfer.Hash != "" && !strings.EqualFold(manifest.Hash, transfer.Hash) {
 		return manifest, fmt.Errorf("manifest hash does not match transfer %d", transfer.ID)
 	}
-	// Latest poll metadata is explicit in the result, independent of the stored
-	// processing-time name. Reading never rewrites the ownership record.
-	manifest.RemoteName = transfer.Name
 	claim := manifest.claimedRoot()
 	manifest, err := manifest.resolve()
 	if err != nil {
@@ -432,7 +429,7 @@ func (m *Manager) prepareManifest(transfer *putio.Transfer, files []*putio.File)
 			}
 		}
 	} else {
-		manifest := LocalManifest{TransferID: transfer.ID, Hash: transfer.Hash, LocalRoot: filepath.Clean(transfer.Name), RemoteName: transfer.Name, Files: expected}
+		manifest := LocalManifest{TransferID: transfer.ID, Hash: transfer.Hash, LocalRoot: filepath.Clean(transfer.Name), Files: expected}
 		if _, err := snapshot.validateManifest(&local, manifest, ManifestCheckPending); err != nil {
 			return nil, err
 		}

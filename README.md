@@ -552,10 +552,11 @@ ID-only queue response does not verify the local files.
 
 Existing `.plundrio-files/<id>.json` arrays remain readable and are not rewritten
 on name changes. New downloads store a version-1 object with `transferId`,
-`hash` (when available), `localRoot`, `remoteName`, and `files`. `localRoot` is
-the processing-time path; stored `remoteName` records the observation at creation.
-Readers pair that local root with the latest poll's remote name without changing
-the ownership record. A legacy array records no root at all, only file paths.
+`hash` (when available), `localRoot`, and `files`. `localRoot` is the
+processing-time path; no remote display name is persisted, since the latest poll
+already carries it and a stored copy would only go stale. Objects written by an
+earlier build that also contain a `remoteName` field stay readable and are left
+byte-identical. A legacy array records no root at all, only file paths.
 Since manifest entries are written as `<root>/<file>`, a read without the remote
 listing accepts the shared first component exactly when some entry sits directly
 inside it: `old-root/file.epub` proves the root `old-root`, and that root is kept
@@ -670,7 +671,7 @@ module dependencies must already be available for an offline run):
 
 ```sh
 go test ./internal/download ./internal/server ./internal/reconcile \
-  -run 'Manifest|Drift|TransferFileStore|TorrentRemove|Reconcile' -count=1 -v
+  -run 'Manifest|Drift|TransferFileStore|TorrentRemove|TorrentGet|Reconcile' -count=1 -v
 ```
 
 Expected: all three packages end in `PASS` / `ok`. The tests use temporary files
@@ -697,6 +698,22 @@ changed-name happy-path cases with `outside transfer "new-root"`; unchanged-name
 and ID-only controls pass. To isolate that small demonstration, use
 `go test ./internal/server -run '^TestManifestNameDriftRPC$' -count=1 -v`.
 On the fixed implementation all four name/selector combinations pass.
+
+A transfer name may contain any byte the local filesystem accepts, including a
+backslash: on POSIX systems `AC\DC - Album` is one directory name, not a path,
+and it is stored, reloaded and removed exactly as received, with no
+normalization or renaming. Only a NUL byte, a traversal, a non-local path and
+the reserved `.plundrio-files` name are refused. Verify that behavior — manifest
+initialization through the production download path, reload after a remote
+rename, the legacy array read, and `torrent-remove` of the literal root — with:
+
+```sh
+go test ./internal/download ./internal/server \
+  -run 'LiteralBackslash|RejectsNulInManifest' -count=1 -v
+```
+
+Expected: both packages `PASS` / `ok`. These names are rejected on Windows
+filesystems, which plundrio does not target.
 
 Older binaries cannot read newly created version-1 objects. Back up ownership
 metadata before upgrading; a downgrade without a compatible reader will report
