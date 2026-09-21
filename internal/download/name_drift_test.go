@@ -589,3 +589,107 @@ func TestManifestNameDriftManifestlessUnsafeName(t *testing.T) {
 		})
 	}
 }
+
+// A removal marker is the only durable record of a released transfer's
+// category. When it cannot be read, that transfer's local root is unknown, so
+// every ownership answer that depends on it must fail instead of falling back
+// to the download root and leaving its payload unguarded.
+func TestManifestNameDriftUnreadableRemovalMarkerCategory(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		markerID   int64
+		marker     string
+		wantErr    string
+		controlErr string
+	}{
+		{name: "corrupt owner marker", markerID: 101, marker: `{`, wantErr: "category for manifest 101", controlErr: "category for manifest 101"},
+		{name: "non-string owner marker", markerID: 101, marker: `42`, wantErr: "category for manifest 101", controlErr: "category for manifest 101"},
+		{name: "readable owner marker", markerID: 101, marker: `"tv"`, wantErr: "collides with transfer 101"},
+		{name: "corrupt subject marker", markerID: 202, marker: `{`, wantErr: "category for transfer 202"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newManagerForTest(t, nil)
+			m.cfg.UseCategoriesTarget = true
+			m.SetCategory(101, "tv")
+			m.SetCategory(202, "tv")
+			m.SetCategory(303, "movies")
+			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", `[{"name":"Show/ep1.mkv","length":3}]`)
+			driftWrite(t, m.cfg.TargetDir, fmt.Sprintf(".plundrio-files/%d.removing.json", tc.markerID), tc.marker)
+			driftWrite(t, m.cfg.TargetDir, "tv/Show/ep1.mkv", "one")
+			driftWrite(t, m.cfg.TargetDir, "movies/Other/feature.mkv", "two")
+			before := driftSnapshot(t, m.cfg.TargetDir)
+			for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+				manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 202, Name: "Show"}, check)
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("check %d: unreadable category did not fail closed: %+v %v", check, manifest, err)
+				}
+				if manifest.LocalRoot != "" {
+					t.Fatalf("check %d: refused transfer reported ownership %q", check, manifest.LocalRoot)
+				}
+				manifest, err = m.GetTransferManifest(&putio.Transfer{ID: 303, Name: "Other"}, check)
+				if tc.controlErr == "" {
+					if err != nil || manifest.LocalRoot != "" {
+						t.Fatalf("check %d: unrelated transfer failed closed: %+v %v", check, manifest, err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), tc.controlErr) {
+					t.Fatalf("check %d: unrelated transfer ignored the broken record: %+v %v", check, manifest, err)
+				}
+			}
+			driftUnchanged(t, m.cfg.TargetDir, before)
+		})
+	}
+}
+
+// A backslash is an ordinary byte in a POSIX filename. Manifests record the
+// name Put.io reported, so the same literal must initialize, reload and delete
+// unchanged, exactly as it did before manifests existed.
+func TestManifestNameDriftLiteralBackslashName(t *testing.T) {
+	const name = `AC\DC - Album`
+	const entry = `AC\DC - Album/file.mkv`
+
+	m := newManagerForTest(t, nil)
+	files, err := buildTransferFileManifest(&putio.Transfer{ID: 101, Name: name}, []*putio.File{{Name: "file.mkv", Size: 3}})
+	if err != nil {
+		t.Fatalf("literal name refused during manifest initialization: %v", err)
+	}
+	if len(files) != 1 || files[0].Name != entry {
+		t.Fatalf("manifest = %+v, want single entry %q", files, entry)
+	}
+	if err := m.transferFiles.Set(101, files); err != nil {
+		t.Fatalf("literal name refused during manifest persistence: %v", err)
+	}
+	driftWrite(t, m.cfg.TargetDir, filepath.Join(name, "file.mkv"), "one")
+	driftWrite(t, m.cfg.TargetDir, `Solo\Act/other.mkv`, "two")
+	before := driftSnapshot(t, m.cfg.TargetDir)
+
+	for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+		manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "renamed upstream"}, check)
+		if err != nil {
+			t.Fatalf("check %d: persisted literal name failed to reload: %v", check, err)
+		}
+		if manifest.LocalRoot != name || len(manifest.Files) != 1 || manifest.Files[0].Name != entry {
+			t.Fatalf("check %d: reload rewrote the literal name: %+v", check, manifest)
+		}
+		// An unclaimed literal-backslash name is still its own deletion candidate.
+		if manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 202, Name: `Solo\Act`}, check); err != nil || manifest.LocalRoot != "" {
+			t.Fatalf("check %d: manifest-less literal name refused: %+v %v", check, manifest, err)
+		}
+		// The owned root is still guarded against a same-named transfer.
+		if manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 202, Name: name}, check); err == nil || !strings.Contains(err.Error(), "collides with transfer 101") {
+			t.Fatalf("check %d: literal name bypassed ownership: %+v %v", check, manifest, err)
+		}
+	}
+	driftUnchanged(t, m.cfg.TargetDir, before)
+}
+
+// A NUL byte cannot appear in a POSIX path, so it stays rejected.
+func TestManifestNameDriftRejectsNulInManifestEntry(t *testing.T) {
+	m := newManagerForTest(t, nil)
+	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", `[{"name":"AC\u0000DC/file.mkv","length":3}]`)
+	before := driftSnapshot(t, m.cfg.TargetDir)
+	manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "AC\x00DC"}, ManifestCheckProcessed)
+	if err == nil || !strings.Contains(err.Error(), "unsafe manifest entry") {
+		t.Fatalf("NUL byte accepted in manifest entry: %+v %v", manifest, err)
+	}
+	driftUnchanged(t, m.cfg.TargetDir, before)
+}

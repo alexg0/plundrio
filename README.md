@@ -644,7 +644,12 @@ as a claim on just one of them. Ownership therefore fails closed: while
 such a file exists, `torrent-get` file listings and local-data deletion are
 refused for every transfer in that download root, not only the corrupt one.
 Reconciliation reads each listed transfer's own record and refuses when that
-record is unreadable. The error names the lowest-numbered unreadable manifest and
+record is unreadable. Once a transfer is released for removal its category
+lives only in `.plundrio-files/<id>.removing.json`, so an unreadable or
+non-string marker leaves that transfer's local root unknown and fails closed the
+same way; it is never read as the empty category, which would place the root at
+the download root and leave the real payload unguarded against another
+transfer's deletion candidate. The error names the lowest-numbered unreadable manifest and
 names the same one on every read, so repeated requests point at one record to
 repair rather than at whichever one a map iteration surfaced. Repair that file —
 restore it from a backup of `.plundrio-files/` or correct its JSON — to restore

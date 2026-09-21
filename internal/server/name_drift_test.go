@@ -564,3 +564,94 @@ func TestTorrentRemoveManifestlessUnsafeNameRefusesEverything(t *testing.T) {
 		})
 	}
 }
+
+// An unreadable removal marker leaves a released transfer's category unknown
+// while its payload stays on disk. Ownership must refuse rather than compare
+// against the download root, which would clear the way to delete that payload.
+func TestTorrentRemoveUnreadableRemovalMarkerRefusesCategoryRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		marker  string
+		wantErr string
+	}{
+		{name: "corrupt marker", marker: `{`, wantErr: "category for manifest 101"},
+		{name: "readable marker", marker: `"tv"`, wantErr: "collides with transfer 101"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeManifestFixture(t, root, ".plundrio-files/101.json", []byte(`[{"name":"Show/ep1.mkv","length":3}]`))
+			writeManifestFixture(t, root, ".plundrio-files/101.removing.json", []byte(tc.marker))
+			writeManifestFixture(t, root, "tv/Show/ep1.mkv", []byte("one"))
+
+			cfg := &config.Config{TargetDir: root, UseCategoriesTarget: true}
+			transfers := []*putio.Transfer{
+				{ID: 101, Hash: "ABC123", Name: "Show", FileID: 501, Status: "COMPLETED", PercentDone: 100},
+				{ID: 202, Hash: "DEF456", Name: "Show", FileID: 502, Status: "DOWNLOADING"},
+			}
+			client := &torrentAddClient{transfers: transfers}
+			manager := download.New(cfg, nil)
+			manager.SetCategory(101, "tv")
+			manager.SetCategory(202, "tv")
+			srv := &Server{cfg: cfg, client: client, dlService: &manifestRPCService{Manager: manager, transfers: transfers}}
+			before := localSnapshot(t, root)
+
+			torrents := manifestRPC(t, srv, `{"fields":["id","name","files","error","errorString"]}`)
+			if torrents[1].Error != trErrorLocal || !strings.Contains(torrents[1].ErrorString, tc.wantErr) {
+				t.Fatalf("manifest-less transfer was not refused: %+v", torrents[1])
+			}
+
+			_, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[202],"delete-local-data":true}`))
+			if err == nil || !strings.Contains(err.Error(), "establish local ownership for transfer 202; nothing was removed") || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("removal proceeded against an unresolved owner category: %v", err)
+			}
+			if len(client.deleted) != 0 || len(client.deletedFiles) != 0 {
+				t.Fatalf("refused removal still mutated Put.io: transfers=%v files=%v", client.deleted, client.deletedFiles)
+			}
+			if manager.RemovalPending(202) || manager.GetCategory(202) != "tv" {
+				t.Fatalf("refused removal dropped local bookkeeping: pending=%t category=%q", manager.RemovalPending(202), manager.GetCategory(202))
+			}
+			localUnchanged(t, root, before)
+		})
+	}
+}
+
+// The literal name Put.io reported survives the whole RPC round trip: it is
+// what torrent-get reports and what torrent-remove deletes, with no rewriting.
+func TestTorrentGetAndRemoveLiteralBackslashName(t *testing.T) {
+	const name = `AC\DC - Album`
+	root := t.TempDir()
+	writeManifestFixture(t, root, ".plundrio-files/101.json", []byte(`[{"name":"AC\\DC - Album/file.mkv","length":3}]`))
+	writeManifestFixture(t, root, filepath.Join(name, "file.mkv"), []byte("one"))
+	writeManifestFixture(t, root, "keep/other.mkv", []byte("two"))
+
+	cfg := &config.Config{TargetDir: root}
+	transfers := []*putio.Transfer{{ID: 101, Hash: "ABC123", Name: "renamed upstream", FileID: 501, Status: "DOWNLOADING", PercentDone: 100}}
+	client := &torrentAddClient{transfers: transfers}
+	manager := download.New(cfg, nil)
+	service := &manifestRPCService{
+		Manager:   manager,
+		transfers: transfers,
+		contexts: map[int64]*download.TransferContext{
+			101: download.NewTransferContext(101, 0, download.TransferLifecycleProcessed),
+		},
+	}
+	srv := &Server{cfg: cfg, client: client, dlService: service}
+
+	torrents := manifestRPC(t, srv, `{"fields":["id","name","files","error","errorString"]}`)
+	if len(torrents) != 1 || torrents[0].Error != 0 || torrents[0].Name != name {
+		t.Fatalf("literal name was not reported as the local root: %+v", torrents[0])
+	}
+	if len(torrents[0].Files) != 1 || torrents[0].Files[0].Name != name+"/file.mkv" {
+		t.Fatalf("literal name was rewritten in the file list: %+v", torrents[0].Files)
+	}
+
+	if _, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[101],"delete-local-data":true}`)); err != nil {
+		t.Fatalf("removal of a literal-backslash root refused: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, name)); !os.IsNotExist(err) {
+		t.Fatalf("owned literal root survived removal: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "keep/other.mkv")); err != nil || string(data) != "two" {
+		t.Fatalf("removal reached beyond the literal root: %q %v", data, err)
+	}
+}

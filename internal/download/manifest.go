@@ -97,7 +97,7 @@ func (manifest LocalManifest) validateRoot() error {
 }
 
 func safeManifestPath(path string) bool {
-	return path != "." && filepath.IsLocal(path) && filepath.Clean(path) == path && !strings.ContainsAny(path, "\\\x00")
+	return path != "." && filepath.IsLocal(path) && filepath.Clean(path) == path && !strings.ContainsRune(path, 0)
 }
 
 // A legacy array records only file paths, never how many of their components
@@ -157,7 +157,7 @@ type TransferFileReader interface {
 type manifestSnapshot struct {
 	targetDir string
 	manifests map[int64]LocalManifest
-	category  func(int64) string
+	category  func(int64) (string, error)
 	errors    map[int64]error
 	scanErr   error
 }
@@ -259,7 +259,10 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 	if err != nil {
 		return manifest, err
 	}
-	category := s.category(transfer.ID)
+	category, err := s.category(transfer.ID)
+	if err != nil {
+		return manifest, fmt.Errorf("cannot establish ownership: category for transfer %d: %w", transfer.ID, err)
+	}
 	if category != "" && !safeManifestPath(category) {
 		return manifest, fmt.Errorf("unsafe manifest category %q", category)
 	}
@@ -342,7 +345,10 @@ func (s *manifestSnapshot) checkManifestCollision(id int64, root string) error {
 		if otherID == id || len(other.Files) == 0 {
 			continue
 		}
-		category := s.category(otherID)
+		category, err := s.category(otherID)
+		if err != nil {
+			return fmt.Errorf("cannot establish ownership: category for manifest %d: %w", otherID, err)
+		}
 		if category != "" && !safeManifestPath(category) {
 			return fmt.Errorf("unsafe category for manifest %d", otherID)
 		}
