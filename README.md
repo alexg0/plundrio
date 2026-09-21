@@ -494,6 +494,23 @@ one byte remaining as a sentinel, not a measured payload size. No file list or
 ownership is invented. Missing child folders during listing and invalid existing
 manifests remain errors; they are not classified as legacy source absence.
 
+Whether the record exists is decided from that transfer's own persisted
+manifest alone. Restoration claims no local path, so the current remote display
+name is not resolved to a deletion candidate and another transfer's claimed root
+is not consulted: a held transfer whose name happens to match a directory
+another transfer owns is still held, and that owner keeps its manifest and its
+files. An unreadable state directory, or a malformed, unsafe or unreadable
+manifest belonging to the transfer itself, remains an error rather than
+absence. Deletion and removal paths are unchanged and still refuse a
+manifest-less claim they cannot bound.
+
+```
+go test ./internal/download -run 'ManifestlessRestoration' -count=1 -v
+```
+
+Expected: `PASS` / `ok`, covering the duplicate-name hold across a restart plus
+the malformed, unsafe and unrelated-record cases.
+
 The hold is persisted in `.plundrio-files/<id>.review.json`. Preserve these files:
 restarts, source reappearance, and remote ERROR status do not resume processing
 or authorize automatic deletion. Corrupt review markers also hold the record

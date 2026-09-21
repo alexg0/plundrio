@@ -148,6 +148,27 @@ func (m *Manager) GetTransferManifest(transfer *putio.Transfer, check ManifestCh
 	return m.TransferFileReader().GetTransferManifest(transfer, check)
 }
 
+// restorationManifest reports the transfer's own persisted ownership when the
+// remote source is already gone. Absence of a record for this ID is reported as
+// an empty manifest, since nothing local is claimed and no deletion candidate
+// is involved; an unreadable state directory or a malformed record for this ID
+// is still an error. Records that exist are validated in full.
+func (m *Manager) restorationManifest(transfer *putio.Transfer) (LocalManifest, error) {
+	m.transferFiles.mu.RLock()
+	snapshot := m.readManifests()
+	m.transferFiles.mu.RUnlock()
+	if snapshot.scanErr != nil {
+		return LocalManifest{}, snapshot.scanErr
+	}
+	if err := snapshot.errors[transfer.ID]; err != nil {
+		return LocalManifest{}, err
+	}
+	if _, exists := snapshot.manifests[transfer.ID]; !exists {
+		return LocalManifest{}, nil
+	}
+	return snapshot.GetTransferManifest(transfer, ManifestCheckComplete)
+}
+
 // TransferFileReader keeps one ownership snapshot for a files-inclusive RPC,
 // avoiding a full disk scan for every torrent in the response.
 type TransferFileReader interface {

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/elsbrock/go-putio"
+	"github.com/elsbrock/plundrio/internal/api"
 	"github.com/elsbrock/plundrio/internal/config"
 )
 
@@ -816,4 +817,103 @@ func TestManifestNameDriftLiteralBackslashProductionInit(t *testing.T) {
 		}
 	}
 	driftUnchanged(t, m.cfg.TargetDir, before)
+}
+
+const ownerDriftManifest = `{"version":1,"transferId":7,"localRoot":"Show.S01","files":[{"name":"Show.S01/ep1.mkv","length":4}]}`
+
+// A manifest-less transfer whose remote name happens to match another
+// transfer's owned root is held for review, not failed: restoration claims
+// nothing locally, so the other owner's boundary is never consulted, and the
+// hold survives a restart with that owner's files and record untouched.
+func TestManifestlessRestorationHoldsDuplicateNameForReview(t *testing.T) {
+	held := &putio.Transfer{ID: 8, FileID: 500, Name: "Show.S01", Status: "COMPLETED", SaveParentID: testFolderID}
+	client := &fakeClient{
+		transfers: func() ([]*putio.Transfer, error) { return []*putio.Transfer{held}, nil },
+		files: func(id int64) ([]*putio.File, error) {
+			return nil, fmt.Errorf("wrapped: %w", &api.TransferSourceNotFoundError{FileID: id, Err: &putio.ErrorResponse{Type: "NotFound"}})
+		},
+	}
+	m := newManagerForTest(t, client)
+	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/7.json", ownerDriftManifest)
+	driftWrite(t, m.cfg.TargetDir, "Show.S01/ep1.mkv", "data")
+	owner := driftSnapshot(t, filepath.Join(m.cfg.TargetDir, "Show.S01"))
+
+	m.processor.processTransfer(held)
+	for _, instance := range []*Manager{m, New(m.cfg, client)} {
+		for range 3 {
+			instance.processor.checkTransfers()
+			instance.processorWg.Wait()
+		}
+		ctx, ok := instance.GetTransferContext(8)
+		if !ok || ctx.GetState() != TransferLifecycleNeedsReview {
+			t.Fatalf("duplicate name lost the review hold: %+v", ctx)
+		}
+		if !instance.NeedsReview(8) {
+			t.Fatal("review hold was not persisted for restart")
+		}
+		if files, ok := instance.GetTransferFiles(8); ok || len(files) != 0 {
+			t.Fatal("review invented a manifest")
+		}
+		if _, err := os.Lstat(instance.transferFiles.path(8)); !os.IsNotExist(err) {
+			t.Fatalf("review wrote a manifest for the held transfer: %v", err)
+		}
+		if instance.NeedsReview(7) {
+			t.Fatal("the other owner was held for review")
+		}
+	}
+	data, err := os.ReadFile(m.transferFiles.path(7))
+	if err != nil || string(data) != ownerDriftManifest {
+		t.Fatalf("the other owner's manifest changed: %q %v", string(data), err)
+	}
+	driftUnchanged(t, filepath.Join(m.cfg.TargetDir, "Show.S01"), owner)
+}
+
+// Restoration reaches the durable hold only for genuine absence of the
+// transfer's own record. Malformed, unsafe or unreadable local state is still
+// an error, and an unrelated unreadable record never converts absence into one.
+func TestManifestlessRestorationDistinguishesOwnState(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		setup  func(*testing.T, *Manager)
+		remote string
+		review bool
+	}{
+		{name: "absent", remote: "Book", review: true},
+		{name: "unsafe remote name", remote: ".plundrio-files", review: true},
+		{name: "unrelated corrupt manifest", remote: "Book", review: true, setup: func(t *testing.T, m *Manager) {
+			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/9.json", "{")
+		}},
+		{name: "own corrupt manifest", remote: "Book", setup: func(t *testing.T, m *Manager) {
+			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/8.json", "{")
+		}},
+		{name: "own unsafe manifest root", remote: "Book", setup: func(t *testing.T, m *Manager) {
+			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/8.json", `[{"name":"../escape/file.epub","length":4}]`)
+		}},
+		{name: "own manifest outside its root", remote: "Book", setup: func(t *testing.T, m *Manager) {
+			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/8.json", `{"version":1,"transferId":8,"localRoot":"Book","files":[{"name":"Other/file.epub","length":4}]}`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newManagerForTest(t, &fakeClient{files: func(id int64) ([]*putio.File, error) {
+				return nil, &api.TransferSourceNotFoundError{FileID: id, Err: &putio.ErrorResponse{Type: "NotFound"}}
+			}})
+			if tc.setup != nil {
+				tc.setup(t, m)
+			}
+			m.processor.processTransfer(&putio.Transfer{ID: 8, FileID: 500, Name: tc.remote, Status: "COMPLETED", SaveParentID: testFolderID})
+			ctx, ok := m.GetTransferContext(8)
+			if !ok {
+				t.Fatal("restoration dropped the transfer")
+			}
+			if tc.review {
+				if ctx.GetState() != TransferLifecycleNeedsReview || !m.NeedsReview(8) || ctx.GetError() != nil {
+					t.Fatalf("absence was not held for review: %+v %v", ctx.GetState(), ctx.GetError())
+				}
+				return
+			}
+			if ctx.GetState() != TransferLifecycleFailed || ctx.GetError() == nil || m.NeedsReview(8) {
+				t.Fatalf("invalid local state was not refused: %+v %v", ctx.GetState(), ctx.GetError())
+			}
+		})
+	}
 }
