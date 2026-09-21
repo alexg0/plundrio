@@ -143,8 +143,9 @@ func TestHandleTorrentGetRejectsUnsafeManifest(t *testing.T) {
 		},
 	}
 	server := &Server{cfg: &config.Config{TargetDir: t.TempDir()}, dlService: service}
-	if _, err := server.handleTorrentGet(context.Background(), json.RawMessage(`{"ids":[101],"fields":["files"]}`)); err == nil {
-		t.Fatal("expected unsafe manifest to fail")
+	torrents := manifestRPC(t, server, `{"ids":[101],"fields":["files","error","errorString"]}`)
+	if len(torrents) != 1 || torrents[0].Error != trErrorLocal || torrents[0].ErrorString == "" || torrents[0].Files == nil || len(torrents[0].Files) != 0 {
+		t.Fatalf("unsafe manifest was not reported as a local error: %+v", torrents)
 	}
 }
 

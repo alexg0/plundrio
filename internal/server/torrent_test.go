@@ -92,10 +92,11 @@ func (s *torrentAddDownloadService) GetTransferContext(transferID int64) (*downl
 	return ctx, ok
 }
 
-func (s *torrentAddDownloadService) GetTransferFiles(transferID int64) ([]download.TransferFile, bool) {
-	files, ok := s.files[transferID]
-	return files, ok
+func (s *torrentAddDownloadService) GetTransferManifest(transfer *putio.Transfer, complete bool) (download.LocalManifest, error) {
+	return download.ResolveManifest(transfer.ID, transfer.Name, s.files[transfer.ID])
 }
+
+func (s *torrentAddDownloadService) TransferFileReader() download.TransferFileReader { return s }
 
 func (s *torrentAddDownloadService) SetCategory(transferID int64, category string) {
 	if s.categories == nil {

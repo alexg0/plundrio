@@ -323,6 +323,10 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 		Msg("Retrieved all transfers from processor")
 
 	// Convert Put.io transfers to transmission format
+	var fileReader download.TransferFileReader
+	if slices.Contains(params.Fields, "files") {
+		fileReader = s.dlService.TransferFileReader()
+	}
 	torrents := make([]map[string]interface{}, 0, len(transfers))
 	for _, t := range transfers {
 		// Filter by IDs if specified
@@ -421,9 +425,15 @@ func (s *Server) handleTorrentGet(_ context.Context, args json.RawMessage) (inte
 		}
 
 		if slices.Contains(params.Fields, "files") {
-			files, err := s.localTorrentFiles(t, percentDone >= 1)
+			files, err := s.localTorrentFiles(fileReader, t, percentDone >= 1)
 			if err != nil {
-				return nil, fmt.Errorf("list local files for transfer %d: %w", t.ID, err)
+				torrentInfo["error"] = trErrorLocal
+				torrentInfo["errorString"] = fmt.Sprintf("list local files for transfer %d: %v", t.ID, err)
+				torrentInfo["status"] = trStatusStopped
+				torrentInfo["seedIdleMode"] = transmissionLimitModeUnlimited
+				torrentInfo["rateDownload"] = 0
+				torrentInfo["rateUpload"] = 0
+				files = []transmissionFile{}
 			}
 			torrentInfo["files"] = files
 		}
@@ -483,28 +493,13 @@ type transmissionFile struct {
 
 // localTorrentFiles returns the transfer-ID-keyed manifest. Names are relative
 // to downloadDir, matching Transmission's files contract.
-func (s *Server) localTorrentFiles(transfer *putio.Transfer, complete bool) ([]transmissionFile, error) {
-	transferName := filepath.Clean(transfer.Name)
-	if transferName == "." || !filepath.IsLocal(transferName) {
-		return nil, fmt.Errorf("unsafe transfer path %q", transfer.Name)
+func (s *Server) localTorrentFiles(reader download.TransferFileReader, transfer *putio.Transfer, complete bool) ([]transmissionFile, error) {
+	manifest, err := reader.GetTransferManifest(transfer, complete)
+	if err != nil {
+		return nil, err
 	}
-	manifest, ok := s.dlService.GetTransferFiles(transfer.ID)
-	if !ok {
-		// Put.io may be complete before the local processor has built its
-		// authoritative manifest. Keep the torrent in the RPC response without
-		// claiming ownership of any files yet.
-		return []transmissionFile{}, nil
-	}
-	files := make([]transmissionFile, 0, len(manifest))
-	for _, file := range manifest {
-		if file.Length < 0 {
-			return nil, fmt.Errorf("manifest file %q has negative length", file.Name)
-		}
-		name := filepath.Clean(filepath.FromSlash(file.Name))
-		rel, err := filepath.Rel(transferName, name)
-		if err != nil || rel == "." || !filepath.IsLocal(rel) {
-			return nil, fmt.Errorf("manifest file %q is outside transfer %q", file.Name, transfer.Name)
-		}
+	files := make([]transmissionFile, 0, len(manifest.Files))
+	for _, file := range manifest.Files {
 		var bytesCompleted int64
 		// Whole-transfer granularity: per-file progress is not persisted.
 		// Report each file's full length only after the local transfer completes.
@@ -514,7 +509,7 @@ func (s *Server) localTorrentFiles(transfer *putio.Transfer, complete bool) ([]t
 		files = append(files, transmissionFile{
 			BytesCompleted: bytesCompleted,
 			Length:         file.Length,
-			Name:           filepath.ToSlash(name),
+			Name:           file.Name,
 		})
 	}
 	return files, nil

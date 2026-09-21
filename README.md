@@ -541,6 +541,68 @@ reconciliation, and unmanaged-file deletion. Transmission `files` names are
 relative to `downloadDir`; `bytesCompleted` currently reports whole-transfer
 completion (zero until complete, then each file's full length).
 
+### Transfer name changes and verification
+
+A Put.io transfer's numeric ID owns its manifest; its current name is display
+metadata. If ID `101` was downloaded under `old-root` and Put.io later calls it
+`new-root`, `torrent-get` still returns `old-root/...` in `files`, relative to
+`downloadDir`. Numeric and case-insensitive hash selectors continue to select
+the same transfer. Request `files`, `error`, and `errorString` together: an
+ID-only queue response does not verify the local files.
+
+Existing `.plundrio-files/<id>.json` arrays remain readable and are not rewritten
+on name changes. New downloads store a version-1 object with `transferId`,
+`hash` (when available), `localRoot`, `remoteName`, and `files`. `localRoot` is
+the processing-time path; stored `remoteName` records the observation at creation.
+Readers pair that local root with the latest poll's remote name without changing
+the ownership record. Legacy arrays must contain a single safe top-level root.
+For source-present retries, the complete remote file list must match the stored
+names and sizes; this also recovers nested legacy roots without using the current
+display name. The stored file order is retained.
+
+Reconciliation rejects missing roots after name drift, duplicate or malformed
+entries, traversal, symlinks in state or payload paths, and competing root claims
+(including category ancestors and case-only aliases). Incomplete downloads may
+have missing/partial files; completed restoration requires every recorded file
+to be regular and exactly the expected length. Size checks do not prove content
+integrity. A corrupt competing ownership record can also prevent reconciliation
+because its claim cannot safely be excluded. No missing manifest is reconstructed
+by scanning the download directory, and no files are moved or deleted by these
+checks. Existing review and removal operations remain separate.
+
+An unsafe manifest produces an empty `files` array, stopped status, disabled
+automatic seed-idle removal, and the standard per-torrent `error=3` with an
+explanation in `errorString`. The RPC itself succeeds so other torrents remain
+inspectable. These are the existing Transmission
+[torrent-get fields](https://raw.githubusercontent.com/transmission/transmission/4.0.6/docs/rpc-spec.md)
+and [local-error code](https://raw.githubusercontent.com/transmission/transmission/4.0.6/libtransmission/transmission.h).
+Consumers must check the error before using the file list.
+
+Run the complete synthetic regression suite with one command (Go toolchain and
+module dependencies must already be available for an offline run):
+
+```sh
+go test ./internal/download ./internal/server -run '^TestManifestNameDrift' -count=1 -v
+```
+
+Expected: both packages end in `PASS` / `ok`. The tests use temporary files and
+mock Put.io data, exercise the public HTTP RPC handler without a listening server,
+and need no credentials, media, or external services. They cover unchanged-name
+and ID-only controls, numeric/hash selectors, restart and source-present polls,
+mixed responses, and refusal cases. Integrity assertions check retained file
+identity, contents, paths, permissions, modification times, and manifest bytes.
+
+Before the fix, the public RPC reproduction on upstream `73905f2` fails only its
+changed-name happy-path cases with `outside transfer "new-root"`; unchanged-name
+and ID-only controls pass. To isolate that small demonstration, use
+`go test ./internal/server -run '^TestManifestNameDriftRPC$' -count=1 -v`.
+On the fixed implementation all four name/selector combinations pass.
+
+Older binaries cannot read newly created version-1 objects. Back up ownership
+metadata before upgrading; a downgrade without a compatible reader will report
+manifest errors for those objects. Do not discard manifests to force completion.
+This change does not repair historical media associations or verify an Arr import.
+
 `torrent-remove` persists a removal marker before deleting remote data. Remote
 transfer deletion gets at most three attempts per request. If it still fails,
 the RPC returns an error, the torrent reports stopped with a removal error,

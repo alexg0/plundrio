@@ -105,6 +105,10 @@ func TestManifestNameDriftRPC(t *testing.T) {
 	if err != nil || !os.SameFile(before, after) {
 		t.Fatalf("payload moved or replaced: %v", err)
 	}
+	payload, err := os.ReadFile(filepath.Join(root, "old-root/book/file.epub"))
+	if err != nil || string(payload) != "book" || before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("payload contents or metadata changed: %q, %v", payload, err)
+	}
 	data, err := os.ReadFile(filepath.Join(root, ".plundrio-files/101.json"))
 	if err != nil || string(data) != manifest {
 		t.Fatalf("manifest changed: %q, %v", data, err)
