@@ -326,7 +326,10 @@ func TestManifestNameDriftRefusesChangedRemoteFiles(t *testing.T) {
 	driftUnchanged(t, m.cfg.TargetDir, before)
 }
 
-func TestManifestNameDriftLegacyNestedRoot(t *testing.T) {
+// A legacy array whose entries all sit below the shared first component is
+// refused identically by initialization, status reads and recovery. A complete
+// remote listing is not a second, more permissive source of the same root.
+func TestManifestNameDriftAmbiguousLegacyRootRefusedEverywhere(t *testing.T) {
 	for _, name := range []string{"old-root/nested", "new-root"} {
 		t.Run(name, func(t *testing.T) {
 			m := newManagerForTest(t, nil)
@@ -334,10 +337,55 @@ func TestManifestNameDriftLegacyNestedRoot(t *testing.T) {
 			driftWrite(t, m.cfg.TargetDir, "old-root/nested/file.epub", "book")
 			driftWrite(t, m.cfg.TargetDir, "old-root/nested/cover.jpg", "cover")
 			before := driftSnapshot(t, m.cfg.TargetDir)
-			// Changed listing order must not change the persisted file order.
-			local, err := m.prepareManifest(&putio.Transfer{ID: 101, Name: name}, []*putio.File{{ID: 12, Name: "cover.jpg", Size: 5}, {ID: 11, Name: "file.epub", Size: 4}})
-			if err != nil || local.Name != "old-root/nested" {
-				t.Fatalf("nested legacy root: %+v %v", local, err)
+			transfer := &putio.Transfer{ID: 101, Name: name}
+			// A complete remote listing, in any order, still proves no boundary.
+			local, err := m.prepareManifest(transfer, []*putio.File{{ID: 12, Name: "cover.jpg", Size: 5}, {ID: 11, Name: "file.epub", Size: 4}})
+			if err == nil || !strings.Contains(err.Error(), `ambiguous legacy manifest root below "old-root"`) {
+				t.Fatalf("initialization accepted an ambiguous legacy root: %+v %v", local, err)
+			}
+			for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+				manifest, err := m.GetTransferManifest(transfer, check)
+				if err == nil || !strings.Contains(err.Error(), `ambiguous legacy manifest root below "old-root"`) {
+					t.Fatalf("check %d accepted an ambiguous legacy root: %+v %v", check, manifest, err)
+				}
+			}
+			if root, err := ManifestLocalRoot(m.cfg.TargetDir, transfer); err == nil || root != "" {
+				t.Fatalf("reconcile accepted an ambiguous legacy root: %q %v", root, err)
+			}
+			driftUnchanged(t, m.cfg.TargetDir, before)
+		})
+	}
+}
+
+// The records plundrio actually wrote as legacy arrays keep their exact
+// ID-owned paths through initialization, a persisted reload, a status read and
+// recovery, whether or not the remote name has drifted.
+func TestManifestNameDriftSupportedLegacyRootResolvesEverywhere(t *testing.T) {
+	for _, name := range []string{"old-root", "new-root"} {
+		t.Run(name, func(t *testing.T) {
+			m := newManagerForTest(t, nil)
+			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", `[{"name":"old-root/file.epub","length":4},{"name":"old-root/cover.jpg","length":5}]`)
+			driftWrite(t, m.cfg.TargetDir, "old-root/file.epub", "book")
+			driftWrite(t, m.cfg.TargetDir, "old-root/cover.jpg", "cover")
+			before := driftSnapshot(t, m.cfg.TargetDir)
+			transfer := &putio.Transfer{ID: 101, Name: name}
+			local, err := m.prepareManifest(transfer, []*putio.File{{ID: 12, Name: "cover.jpg", Size: 5}, {ID: 11, Name: "file.epub", Size: 4}})
+			if err != nil || local.Name != "old-root" {
+				t.Fatalf("initialization lost the legacy root: %+v %v", local, err)
+			}
+			restarted := New(m.cfg, nil)
+			for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+				manifest, err := restarted.GetTransferManifest(transfer, check)
+				if err != nil || manifest.LocalRoot != "old-root" || len(manifest.Files) != 2 {
+					t.Fatalf("check %d lost the legacy root after reload: %+v %v", check, manifest, err)
+				}
+				if manifest.Files[0].Name != "old-root/file.epub" || manifest.Files[1].Name != "old-root/cover.jpg" {
+					t.Fatalf("check %d rewrote the stored file order: %+v", check, manifest.Files)
+				}
+			}
+			root, err := ManifestLocalRoot(m.cfg.TargetDir, transfer)
+			if err != nil || root != "old-root" {
+				t.Fatalf("reconcile lost the legacy root: %q %v", root, err)
 			}
 			driftUnchanged(t, m.cfg.TargetDir, before)
 		})

@@ -570,17 +570,16 @@ nothing, and leaves the manifest byte-identical; `reconcile` fails closed for
 that run rather than treating the files as unmanaged. Repairing one such record
 means replacing it with a version-1 object whose `localRoot` you have verified
 against the files on disk; plundrio never rewrites a legacy array for you. A
-source-present retry can reconstruct the exact root from the complete remote
-listing, but only for that download attempt: the reconstruction is not written
-back into the legacy array, so later `torrent-get`, removal and `reconcile`
-reads of that record stay ambiguous. An ambiguous record
-still blocks any other transfer from claiming the same directory, and unrelated
-transfers keep working. Reported `files` names are never rewritten, and
+complete remote file listing does not lift the refusal: initialization, status,
+removal and `reconcile` all read the record through the same rule, so a
+source-present retry is refused exactly as the later reads are. An ambiguous
+record still blocks any other transfer from claiming the same directory, and
+unrelated transfers keep working. Reported `files` names are never rewritten, and
 `downloadDir` plus the reported name still contains them.
 
 For source-present retries, the complete remote file list must match the stored
-names and sizes; this reconstructs the exact legacy root without using the current
-display name. The stored file order is retained. A mismatch refuses the retry
+names and sizes under the root the manifest itself records; the current display
+name is never used to derive that root. The stored file order is retained. A mismatch refuses the retry
 for the whole listing instead of downloading an intersection, and that refusal is
 not persisted: restoring the complete original listing on Put.io clears it on the
 next poll while reprocess attempts remain (three per process). Once they are
@@ -699,11 +698,14 @@ and ID-only controls pass. To isolate that small demonstration, use
 `go test ./internal/server -run '^TestManifestNameDriftRPC$' -count=1 -v`.
 On the fixed implementation all four name/selector combinations pass.
 
-A transfer name may contain any byte the local filesystem accepts, including a
-backslash: on POSIX systems `AC\DC - Album` is one directory name, not a path,
-and it is stored, reloaded and removed exactly as received, with no
-normalization or renaming. Only a NUL byte, a traversal, a non-local path and
-the reserved `.plundrio-files` name are refused. Verify that behavior — manifest
+A backslash is an ordinary filename byte on the POSIX platforms plundrio
+targets, so `AC\DC - Album` is one directory name rather than a path, and it is
+stored, reloaded and removed exactly as received, with no normalization or
+renaming. Every other rule above still applies to it: names are interpreted with
+native path semantics and must be clean, local relative paths, so a traversal, a
+trailing separator, `./x`, `a//b`, a NUL byte and the reserved
+`.plundrio-files` name are all refused, and the ownership, collision, symlink
+and confinement checks are unchanged. Verify that behavior — manifest
 initialization through the production download path, reload after a remote
 rename, the legacy array read, and `torrent-remove` of the literal root — with:
 
@@ -712,8 +714,7 @@ go test ./internal/download ./internal/server \
   -run 'LiteralBackslash|RejectsNulInManifest' -count=1 -v
 ```
 
-Expected: both packages `PASS` / `ok`. These names are rejected on Windows
-filesystems, which plundrio does not target.
+Expected: both packages `PASS` / `ok`.
 
 Older binaries cannot read newly created version-1 objects. Back up ownership
 metadata before upgrading; a downgrade without a compatible reader will report

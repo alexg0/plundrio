@@ -399,12 +399,6 @@ func (m *Manager) prepareManifest(transfer *putio.Transfer, files []*putio.File)
 	local := *transfer
 	snapshot := m.readManifests()
 	if len(stored.Files) > 0 {
-		if stored.LocalRoot == "" {
-			stored.LocalRoot, err = legacyManifestRoot(stored.Files, files)
-			if err != nil {
-				return nil, err
-			}
-		}
 		manifest, err := snapshot.validateManifest(transfer, stored, ManifestCheckPending)
 		if err != nil {
 			return nil, err
@@ -438,45 +432,4 @@ func (m *Manager) prepareManifest(transfer *putio.Transfer, files []*putio.File)
 		}
 	}
 	return &local, nil
-}
-
-// A legacy array does not record how many path components formed its root.
-// When the source is present, only a root reproducing the entire stored file
-// set (names AND sizes) is usable. The remote display name is not evidence.
-func legacyManifestRoot(stored []TransferFile, files []*putio.File) (string, error) {
-	if len(files) == 0 || files[0] == nil {
-		return "", fmt.Errorf("remote file list differs from persisted manifest")
-	}
-	lengths := make(map[string]int64, len(stored))
-	for _, file := range stored {
-		lengths[file.Name] = file.Length
-	}
-	var found string
-	for _, file := range stored {
-		root, ok := strings.CutSuffix(file.Name, "/"+filepath.ToSlash(files[0].Name))
-		if !ok || !safeManifestPath(root) || len(files) != len(stored) {
-			continue
-		}
-		expected, err := buildTransferFileManifest(&putio.Transfer{Name: root}, files)
-		if err != nil {
-			return "", err
-		}
-		matches := true
-		for _, candidate := range expected {
-			if length, ok := lengths[candidate.Name]; !ok || length != candidate.Length {
-				matches = false
-				break
-			}
-		}
-		if matches {
-			if found != "" && found != root {
-				return "", fmt.Errorf("ambiguous legacy manifest root")
-			}
-			found = root
-		}
-	}
-	if found == "" {
-		return "", fmt.Errorf("remote file list differs from persisted manifest")
-	}
-	return found, nil
 }
