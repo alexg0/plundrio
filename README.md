@@ -555,14 +555,29 @@ on name changes. New downloads store a version-1 object with `transferId`,
 `hash` (when available), `localRoot`, `remoteName`, and `files`. `localRoot` is
 the processing-time path; stored `remoteName` records the observation at creation.
 Readers pair that local root with the latest poll's remote name without changing
-the ownership record. Legacy arrays must contain a single safe top-level root.
+the ownership record. A legacy array records no root at all, so a read without
+the remote listing takes the deepest directory every entry shares, unless the
+current remote name still matches a shallower shared directory. The claim is
+therefore never widened to a parent directory holding files the transfer did not
+download: for `old-root/book/file.epub` under the name `old-root` the root stays
+`old-root`, while under a drifted name it narrows to `old-root/book`. Reported
+`files` names are unchanged either way, and `downloadDir` plus the reported name
+still contains them.
+
 For source-present retries, the complete remote file list must match the stored
-names and sizes; this also recovers nested legacy roots without using the current
+names and sizes; this reconstructs the exact legacy root without using the current
 display name. The stored file order is retained. A mismatch refuses the retry
 for the whole listing instead of downloading an intersection, and that refusal is
 not persisted: restoring the complete original listing on Put.io clears it on the
-next poll. Retry bookkeeping is in-memory only, so a restart also re-attempts a
-transfer whose remote listing has since been restored.
+next poll while reprocess attempts remain (three per process). Once they are
+exhausted the transfer is left alone until the process restarts, since retry
+bookkeeping is in-memory only and a restart resets that budget.
+
+Ownership is re-read from disk on every poll and on every files-inclusive
+`torrent-get`, with no cached ownership index: a stale cache could authorize a
+deletion the manifests no longer support. The cost is one directory scan plus one
+read per manifest per request, which is bounded by the number of tracked
+transfers.
 
 Reconciliation rejects missing roots after name drift, duplicate or malformed
 entries, traversal, symlinks in state or payload paths, and competing root claims
@@ -581,13 +596,16 @@ separate.
 
 An unreadable or malformed `.plundrio-files/<id>.json` still claims a local root,
 and that claim cannot safely be excluded. Ownership therefore fails closed: while
-such a file exists, `torrent-get` file listings, local-data deletion and
-reconciliation are refused for every transfer in that download root, not only
-the corrupt one. The
-error names the lowest-numbered unreadable manifest and names the same one on
-every read, so repeated requests point at one record to repair or remove rather
-than at whichever one a map iteration surfaced. Fixing or deleting that file
-restores the others; nothing is reconstructed or deleted automatically.
+such a file exists, `torrent-get` file listings and local-data deletion are
+refused for every transfer in that download root, not only the corrupt one.
+Reconciliation reads each listed transfer's own record and refuses when that
+record is unreadable. The error names the lowest-numbered unreadable manifest and
+names the same one on every read, so repeated requests point at one record to
+repair rather than at whichever one a map iteration surfaced. Repair that file —
+restore it from a backup of `.plundrio-files/` or correct its JSON — to restore
+the others. Keep the ownership evidence: deleting it does not make the transfer
+safe to remove, it only discards the record of which local files it owns.
+Nothing is reconstructed or deleted automatically.
 
 An unsafe manifest produces an empty `files` array, stopped status, disabled
 automatic seed-idle removal, and the standard per-torrent `error=3` with an
@@ -601,14 +619,18 @@ Run the complete synthetic regression suite with one command (Go toolchain and
 module dependencies must already be available for an offline run):
 
 ```sh
-go test ./internal/download ./internal/server -run '^TestManifestNameDrift' -count=1 -v
+go test ./internal/download ./internal/server ./internal/reconcile \
+  -run 'Manifest|Drift|TransferFileStore|TorrentRemove|Reconcile' -count=1 -v
 ```
 
-Expected: both packages end in `PASS` / `ok`. The tests use temporary files and
-mock Put.io data, exercise the public HTTP RPC handler without a listening server,
-and need no credentials, media, or external services. They cover unchanged-name
-and ID-only controls, numeric/hash selectors, restart and source-present polls,
-mixed responses, and refusal cases. Integrity assertions check retained file
+Expected: all three packages end in `PASS` / `ok`. The tests use temporary files
+and mock Put.io data, exercise the public HTTP RPC handler without a listening
+server, and need no credentials, media, or external services. They cover
+unchanged-name and ID-only controls, numeric/hash selectors, restart and
+source-present polls, mixed responses, refusal cases, atomic manifest
+publication, removal that keeps unmanaged siblings and another transfer's data,
+removal refused before any remote or local mutation, and reconciliation of
+drifted and orphaned ownership records. Integrity assertions check retained file
 identity, contents, paths, permissions, modification times, and manifest bytes.
 
 Before the fix, the public RPC reproduction on upstream `73905f2` fails only its

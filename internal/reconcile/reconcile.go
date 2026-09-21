@@ -382,18 +382,20 @@ func activeLocalPaths(root string, transfers []*putio.Transfer, nodes []*localNo
 	for _, rel := range pending {
 		active[rel] = struct{}{}
 	}
-	// A transfer's remote display name may have drifted away from the local
-	// root it actually owns. The persisted manifest is the ownership record.
-	manifestRoots, err := download.ManifestLocalRoots(root)
-	if err != nil {
-		return nil, err
-	}
-	for id, localRoot := range manifestRoots {
-		if err := protectLocalRoot(root, id, localRoot, categories[id], nodes, active); err != nil {
+	for _, transfer := range transfers {
+		// A transfer's remote display name may have drifted away from the local
+		// root it actually owns. The persisted manifest is the ownership record,
+		// but only for a transfer the account still lists: a manifest left over
+		// from a deleted transfer must not keep protecting orphaned data.
+		localRoot, err := download.ManifestLocalRoot(root, transfer)
+		if err != nil {
 			return nil, err
 		}
-	}
-	for _, transfer := range transfers {
+		if localRoot != "" && localRoot != transfer.Name {
+			if err := protectLocalRoot(root, transfer.ID, localRoot, categories[transfer.ID], nodes, active); err != nil {
+				return nil, err
+			}
+		}
 		if err := protectLocalRoot(root, transfer.ID, transfer.Name, categories[transfer.ID], nodes, active); err != nil {
 			return nil, err
 		}

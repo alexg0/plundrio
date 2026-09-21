@@ -184,6 +184,30 @@ func TestReconcileProtectsManifestRootAfterRemoteNameDrift(t *testing.T) {
 	}
 }
 
+// Ownership evidence protects local data only while the account still lists the
+// transfer: a manifest left behind by a deleted transfer must not hide its
+// orphaned files from the unmanaged report.
+func TestReconcileReportsOrphanedManifestRoot(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "old-root"))
+	mustWrite(t, filepath.Join(root, "old-root", "episode.mkv"), "orphan")
+	mustMkdir(t, filepath.Join(root, ".plundrio-files"))
+	mustWrite(t, filepath.Join(root, ".plundrio-files", "10.json"), `[{"name":"old-root/episode.mkv","length":6}]`)
+
+	client := &fakeClient{transfers: []*putio.Transfer{}, files: map[int64][]*putio.File{}}
+	service := New(client, 1, root, false)
+	if object := localUnmanagedObject(t, service, "old-root"); object.Path != "old-root" {
+		t.Fatalf("orphaned manifest root = %+v", object)
+	}
+	report, err := service.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Active) != 0 {
+		t.Fatalf("orphaned manifest still protected local data: %v", objectLabels(report.Active))
+	}
+}
+
 // An unreadable ownership record cannot be excluded from the protected set, so
 // reconciliation refuses instead of reporting an owned root as unmanaged.
 func TestReconcileRefusesCorruptManifestOwnership(t *testing.T) {

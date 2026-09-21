@@ -87,6 +87,12 @@ func TestManifestNameDriftRPC(t *testing.T) {
 	cfg := &config.Config{TargetDir: root}
 	for _, name := range []string{"old-root", "new-root"} {
 		t.Run(name, func(t *testing.T) {
+			// The legacy array records no root, so a drifted name leaves only
+			// the deepest directory its entries share as proven ownership.
+			wantName := "old-root"
+			if name != "old-root" {
+				wantName = "old-root/book"
+			}
 			// A fresh manager exercises the on-disk legacy format, not cached state.
 			service := &manifestRPCService{Manager: download.New(cfg, nil), transfers: []*putio.Transfer{
 				{ID: 101, Hash: "ABC123", Name: name, Status: "COMPLETED", PercentDone: 100, Size: 4},
@@ -103,8 +109,12 @@ func TestManifestNameDriftRPC(t *testing.T) {
 					want := []transmissionFile{{Name: "old-root/book/file.epub", Length: 4}}
 					// The name stays the locally owned root so the importer's
 					// downloadDir/name output path keeps resolving.
-					if len(got) != 1 || got[0].ID != 101 || got[0].Name != "old-root" || got[0].HashString != "ABC123" || got[0].Error != 0 || !reflect.DeepEqual(got[0].Files, want) {
+					if len(got) != 1 || got[0].ID != 101 || got[0].Name != wantName || got[0].HashString != "ABC123" || got[0].Error != 0 || !reflect.DeepEqual(got[0].Files, want) {
 						t.Fatalf("files-inclusive response = %+v, want unchanged old-root files %+v", got, want)
+					}
+					// downloadDir/name must still contain every reported file.
+					if !strings.HasPrefix(want[0].Name, got[0].Name+"/") {
+						t.Fatalf("reported name %q does not contain %q", got[0].Name, want[0].Name)
 					}
 				})
 			}
@@ -204,5 +214,78 @@ func TestManifestNameDriftRemoveDeletesOwnedRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, ".plundrio-files/202.json")); err != nil {
 		t.Fatalf("removal destroyed another transfer's manifest: %v", err)
+	}
+}
+
+// A legacy manifest whose files all sit in one subdirectory must not delete the
+// parent directory, which holds unmanaged data this transfer never downloaded.
+func TestManifestNameDriftRemoveKeepsUnmanagedSiblings(t *testing.T) {
+	root := t.TempDir()
+	writeManifestFixture(t, root, ".plundrio-files/101.json", []byte(`[{"name":"Show/S01/ep1.mkv","length":3},{"name":"Show/S01/ep2.mkv","length":3}]`))
+	writeManifestFixture(t, root, "Show/S01/ep1.mkv", []byte("one"))
+	writeManifestFixture(t, root, "Show/S01/ep2.mkv", []byte("two"))
+	writeManifestFixture(t, root, "Show/S02/ep3.mkv", []byte("thr"))
+	writeManifestFixture(t, root, "Show/poster.jpg", []byte("art"))
+
+	cfg := &config.Config{TargetDir: root}
+	transfers := []*putio.Transfer{{ID: 101, Hash: "ABC123", Name: "Show renamed", PercentDone: 100}}
+	client := &torrentAddClient{transfers: transfers}
+	service := &manifestRPCService{Manager: download.New(cfg, nil), transfers: transfers}
+	srv := &Server{cfg: cfg, client: client, dlService: service}
+
+	if _, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[101],"delete-local-data":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "Show/S01")); !os.IsNotExist(err) {
+		t.Fatalf("owned season was not deleted: %v", err)
+	}
+	for path, want := range map[string]string{"Show/S02/ep3.mkv": "thr", "Show/poster.jpg": "art"} {
+		if data, err := os.ReadFile(filepath.Join(root, path)); err != nil || string(data) != want {
+			t.Fatalf("removal destroyed unmanaged sibling %q: %q %v", path, data, err)
+		}
+	}
+}
+
+// Ownership is resolved before anything is mutated: a transfer whose local root
+// cannot be established keeps its remote record, its local state and its files.
+func TestTorrentRemoveRefusesBeforeAnyMutation(t *testing.T) {
+	root := t.TempDir()
+	const corrupt = `[{"name":"../escape/file.epub","length":4}]`
+	writeManifestFixture(t, root, ".plundrio-files/101.json", []byte(corrupt))
+	writeManifestFixture(t, root, "books/old-root/file.epub", []byte("book"))
+
+	cfg := &config.Config{TargetDir: root, UseCategoriesTarget: true}
+	manager := download.New(cfg, nil)
+	manager.SetCategory(101, "books")
+	transfers := []*putio.Transfer{{ID: 101, Hash: "ABC123", Name: "new-root", FileID: 501, Status: "DOWNLOADING", PercentDone: 100}}
+	client := &torrentAddClient{transfers: transfers}
+	srv := &Server{cfg: cfg, client: client, dlService: &manifestRPCService{Manager: manager, transfers: transfers}}
+
+	_, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[101],"delete-local-data":true}`))
+	if err == nil || !strings.Contains(err.Error(), "establish local ownership for transfer 101; nothing was removed") {
+		t.Fatalf("unresolved ownership did not refuse removal: %v", err)
+	}
+	if len(client.deleted) != 0 || len(client.deletedFiles) != 0 {
+		t.Fatalf("refused removal still mutated Put.io: transfers=%v files=%v", client.deleted, client.deletedFiles)
+	}
+	if got := manager.GetCategory(101); got != "books" {
+		t.Fatalf("category = %q, want it retained", got)
+	}
+	if manager.RemovalPending(101) {
+		t.Fatal("refused removal published a removal marker")
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ".plundrio-files"))
+	if err != nil || len(entries) != 1 || entries[0].Name() != "101.json" {
+		t.Fatalf("local ownership state changed: %+v %v", entries, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, ".plundrio-files/101.json")); err != nil || string(data) != corrupt {
+		t.Fatalf("manifest rewritten: %q %v", data, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "books/old-root/file.epub")); err != nil || string(data) != "book" {
+		t.Fatalf("local payload changed: %q %v", data, err)
+	}
+	// The transfer stays visible, so the operator can retry the same request.
+	if torrents := manifestRPC(t, srv, `{"ids":[101],"fields":["id","name"]}`); len(torrents) != 1 || torrents[0].ID != 101 {
+		t.Fatalf("refused removal dropped the transfer record: %+v", torrents)
 	}
 }

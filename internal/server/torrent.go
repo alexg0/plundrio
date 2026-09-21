@@ -562,6 +562,28 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 			continue
 		}
 
+		// Establish local ownership before any mutation, remote or local: a
+		// refusal here must leave the transfer record, its category, its
+		// manifest and its local payload exactly as they were, so the operator
+		// can resolve the ownership problem and retry the same request.
+		localRoot := transfer.Name
+		if params.DeleteLocalData {
+			manifest, err := s.dlService.TransferFileReader().GetTransferManifest(transfer, download.ManifestCheckProcessed)
+			if err != nil {
+				log.Error("rpc").
+					Str("operation", "torrent-remove").
+					Str("id", id.String()).
+					Int64("transfer_id", transfer.ID).
+					Err(err).
+					Msg("Refusing removal: local ownership unresolved")
+				removalErrors = append(removalErrors, fmt.Errorf("establish local ownership for transfer %d; nothing was removed: %w", transfer.ID, err))
+				continue
+			}
+			if manifest.LocalRoot != "" {
+				localRoot = manifest.LocalRoot
+			}
+		}
+
 		// Capture the deletion destination before remote mutation: the monitor
 		// may reclaim the durable category as soon as remote absence is visible.
 		// Ready remote records must be classified before cancellation; the
@@ -574,19 +596,6 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 		}
 		if !s.cfg.UseCategoriesTarget {
 			category = ""
-		}
-
-		// Resolve ownership before remote mutation: the removal marker still
-		// carries the category and the manifest still records the local root
-		// this transfer owns, which a drifted remote name no longer names.
-		localRoot := transfer.Name
-		var manifestErr error
-		if params.DeleteLocalData {
-			var manifest download.LocalManifest
-			manifest, manifestErr = s.dlService.TransferFileReader().GetTransferManifest(transfer, download.ManifestCheckProcessed)
-			if manifest.LocalRoot != "" {
-				localRoot = manifest.LocalRoot
-			}
 		}
 
 		// Seeding-only transfers (where the file was already deleted) have no
@@ -635,10 +644,7 @@ func (s *Server) handleTorrentRemove(ctx context.Context, args json.RawMessage) 
 
 		if params.DeleteLocalData {
 			localTargetDir := filepath.Join(s.cfg.TargetDir, category)
-			deleteErr := manifestErr
-			if deleteErr == nil {
-				deleteErr = deleteLocalData(localTargetDir, localRoot)
-			}
+			deleteErr := deleteLocalData(localTargetDir, localRoot)
 			if deleteErr != nil {
 				log.Error("rpc").
 					Str("operation", "torrent-remove").

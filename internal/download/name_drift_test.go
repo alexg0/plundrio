@@ -234,7 +234,14 @@ func TestManifestNameDriftPollAndRestart(t *testing.T) {
 				if complete {
 					wantState = TransferLifecycleProcessed
 				}
-				if !ok || ctx.GetState() != wantState || ctx.Name != "old-root" {
+				// A restart after the source is gone has neither the remote
+				// listing nor the original name, so the legacy array proves
+				// only the deepest directory its entries share.
+				wantCtxName := "old-root"
+				if complete && phase == "restart" {
+					wantCtxName = filepath.Join("old-root", "book")
+				}
+				if !ok || ctx.GetState() != wantState || ctx.Name != wantCtxName {
 					t.Fatalf("%s: context=%+v", phase, ctx)
 				}
 				transfer := m.GetTransfers()[0]
@@ -242,8 +249,15 @@ func TestManifestNameDriftPollAndRestart(t *testing.T) {
 				if complete {
 					check = ManifestCheckComplete
 				}
+				// Without the remote listing a legacy array only proves the
+				// deepest directory its entries share; the drifted name may no
+				// longer name any of them.
+				wantRoot := "old-root"
+				if currentName != "old-root" {
+					wantRoot = filepath.Join("old-root", "book")
+				}
 				manifest, err := m.GetTransferManifest(transfer, check)
-				if err != nil || manifest.LocalRoot != "old-root" || manifest.RemoteName != currentName {
+				if err != nil || manifest.LocalRoot != wantRoot || manifest.RemoteName != currentName {
 					t.Fatalf("%s: manifest=%+v err=%v", phase, manifest, err)
 				}
 				if !complete && phase != "renamed poll" {
@@ -380,6 +394,41 @@ func TestManifestNameDriftInitialDownloadWithoutRoot(t *testing.T) {
 			if _, err := m.GetTransferManifest(transfer, ManifestCheckPending); err == nil {
 				t.Fatal("name drift silently accepted missing local root")
 			}
+		})
+	}
+}
+
+// The issue's case: an unchanged transfer ID keeps its original local root
+// after the remote name changes, with no local mutation of any kind.
+func TestManifestNameDriftPreservesLegacyRoot(t *testing.T) {
+	m := newManagerForTest(t, nil)
+	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", `[{"name":"old-root/file.epub","length":4}]`)
+	driftWrite(t, m.cfg.TargetDir, "old-root/file.epub", "book")
+	before := driftSnapshot(t, m.cfg.TargetDir)
+	manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "new-root"}, ManifestCheckComplete)
+	if err != nil || manifest.LocalRoot != "old-root" || manifest.RemoteName != "new-root" || len(manifest.Files) != 1 {
+		t.Fatalf("legacy root lost across name drift: %+v %v", manifest, err)
+	}
+	driftUnchanged(t, m.cfg.TargetDir, before)
+}
+
+// A legacy array whose files all sit in one subdirectory must never be read as
+// owning the parent, which also holds another season this transfer never
+// downloaded.
+func TestManifestNameDriftNeverClaimsSiblingAncestor(t *testing.T) {
+	for _, name := range []string{"Show/S01", "renamed"} {
+		t.Run(name, func(t *testing.T) {
+			m := newManagerForTest(t, nil)
+			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", `[{"name":"Show/S01/ep1.mkv","length":3},{"name":"Show/S01/ep2.mkv","length":3}]`)
+			driftWrite(t, m.cfg.TargetDir, "Show/S01/ep1.mkv", "one")
+			driftWrite(t, m.cfg.TargetDir, "Show/S01/ep2.mkv", "two")
+			driftWrite(t, m.cfg.TargetDir, "Show/S02/ep3.mkv", "thr")
+			before := driftSnapshot(t, m.cfg.TargetDir)
+			manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: name}, ManifestCheckComplete)
+			if err != nil || manifest.LocalRoot != filepath.Join("Show", "S01") || len(manifest.Files) != 2 {
+				t.Fatalf("legacy root = %+v, err = %v", manifest, err)
+			}
+			driftUnchanged(t, m.cfg.TargetDir, before)
 		})
 	}
 }

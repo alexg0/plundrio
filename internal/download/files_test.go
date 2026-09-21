@@ -1,6 +1,7 @@
 package download
 
 import (
+	"fmt"
 	"os"
 	"reflect"
 	"testing"
@@ -45,5 +46,58 @@ func TestTransferFileStoreRejectsEmptyManifest(t *testing.T) {
 	}
 	if _, err := os.Stat(store.path(101)); !os.IsNotExist(err) {
 		t.Fatalf("empty manifest created state file: %v", err)
+	}
+}
+
+// A concurrent reader (another process, or this one after a crash) must never
+// observe a half-written ownership record: a truncated manifest parses as
+// corrupt and fails every transfer closed.
+func TestTransferFileStoreWriteIsAtomic(t *testing.T) {
+	dir := t.TempDir()
+	files := make([]TransferFile, 0, 2000)
+	for i := range cap(files) {
+		files = append(files, TransferFile{Name: fmt.Sprintf("Show/S01/episode-%04d.mkv", i), Length: int64(i + 1)})
+	}
+	writer, reader := newTransferFileStore(dir), newTransferFileStore(dir)
+	if err := writer.Set(101, files); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	reads := make(chan error, 1)
+	go func() {
+		var failure error
+		observed := 0
+		for {
+			got, err := reader.load(101)
+			if err != nil {
+				failure = err
+			} else if len(got) != len(files) {
+				failure = fmt.Errorf("partial manifest: %d of %d files", len(got), len(files))
+			} else {
+				observed++
+			}
+			select {
+			case <-done:
+				if observed == 0 && failure == nil {
+					failure = fmt.Errorf("reader never observed the manifest")
+				}
+				reads <- failure
+				return
+			default:
+			}
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		files[0].Length = int64(i + 1)
+		if err := writer.Set(101, files); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(done)
+	if err := <-reads; err != nil {
+		t.Fatalf("concurrent read of a rewritten manifest failed: %v", err)
+	}
+	if entries, err := os.ReadDir(newTransferFileStore(dir).stateDir); err != nil || len(entries) != 1 {
+		t.Fatalf("publication left temporary state behind: %+v %v", entries, err)
 	}
 }

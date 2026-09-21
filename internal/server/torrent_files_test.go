@@ -94,11 +94,13 @@ func TestHandleTorrentGetReturnsExactManifest(t *testing.T) {
 // reported name, so the name must follow the persisted local root.
 func TestHandleTorrentGetReportsLocalRootAfterNameDrift(t *testing.T) {
 	root := t.TempDir()
-	writeManifestFixture(t, root, ".plundrio-files/101.json", []byte(`[{"name":"old-root/book/file.epub","length":4}]`))
+	writeManifestFixture(t, root, ".plundrio-files/101.json",
+		[]byte(`[{"name":"old-root/book/file.epub","length":4},{"name":"old-root/cover.jpg","length":3}]`))
 	writeManifestFixture(t, root, "old-root/book/file.epub", []byte("book"))
+	writeManifestFixture(t, root, "old-root/cover.jpg", []byte("art"))
 	cfg := &config.Config{TargetDir: root}
 	service := &manifestRPCService{Manager: download.New(cfg, nil), transfers: []*putio.Transfer{
-		{ID: 101, Name: "new-root", Status: "COMPLETED", PercentDone: 100, Size: 4},
+		{ID: 101, Name: "new-root", Status: "COMPLETED", PercentDone: 100, Size: 7},
 	}}
 	srv := &Server{cfg: cfg, dlService: service}
 

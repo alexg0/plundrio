@@ -70,11 +70,30 @@ func (fs *TransferFileStore) setManifest(manifest LocalManifest) error {
 	return fs.write(manifest.TransferID, data)
 }
 
+// Ownership evidence is published by rename, never by truncating the record in
+// place: a reader or a crash during the write must still find a complete
+// manifest, since a partial one reads as corrupt and blocks every transfer.
 func (fs *TransferFileStore) write(transferID int64, data []byte) error {
 	if err := os.MkdirAll(fs.stateDir, 0700); err != nil {
 		return fmt.Errorf("create transfer file state: %w", err)
 	}
-	if err := os.WriteFile(fs.path(transferID), data, 0600); err != nil {
+	file, err := os.CreateTemp(fs.stateDir, ".manifest-*")
+	if err != nil {
+		return fmt.Errorf("write transfer file state: %w", err)
+	}
+	defer os.Remove(file.Name())
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return fmt.Errorf("write transfer file state: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return fmt.Errorf("write transfer file state: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("write transfer file state: %w", err)
+	}
+	if err := os.Rename(file.Name(), fs.path(transferID)); err != nil {
 		return fmt.Errorf("write transfer file state: %w", err)
 	}
 	return nil

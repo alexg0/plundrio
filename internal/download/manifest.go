@@ -23,9 +23,12 @@ type LocalManifest struct {
 	Files      []TransferFile `json:"files"`
 }
 
-func (manifest LocalManifest) resolve() (LocalManifest, error) {
+func (manifest LocalManifest) resolve(remoteName string) (LocalManifest, error) {
 	if manifest.TransferID <= 0 {
 		return manifest, fmt.Errorf("invalid manifest transfer ID %d", manifest.TransferID)
+	}
+	if manifest.LocalRoot == "" && len(manifest.Files) > 0 {
+		manifest.LocalRoot = legacyLocalRoot(manifest.Files, remoteName)
 	}
 	if manifest.LocalRoot != "" && (!safeManifestPath(manifest.LocalRoot) || IsReservedTransferName(strings.Split(manifest.LocalRoot, string(filepath.Separator))[0])) {
 		return manifest, fmt.Errorf("unsafe manifest root %q", manifest.LocalRoot)
@@ -39,9 +42,6 @@ func (manifest LocalManifest) resolve() (LocalManifest, error) {
 		root, _, hasFile := strings.Cut(name, string(filepath.Separator))
 		if !hasFile || IsReservedTransferName(root) {
 			return manifest, fmt.Errorf("unsafe manifest root in %q", file.Name)
-		}
-		if manifest.LocalRoot == "" {
-			manifest.LocalRoot = root
 		}
 		rel, err := filepath.Rel(manifest.LocalRoot, name)
 		if err != nil || !safeManifestPath(rel) {
@@ -57,6 +57,57 @@ func (manifest LocalManifest) resolve() (LocalManifest, error) {
 
 func safeManifestPath(path string) bool {
 	return path != "." && filepath.IsLocal(path) && filepath.Clean(path) == path && !strings.ContainsAny(path, "\\\x00")
+}
+
+// A legacy array records only file paths, never how many of their components
+// formed the transfer root. Ownership is therefore the deepest directory every
+// entry shares, unless the remote name still matches a shallower shared
+// directory. A drifted name can never widen the claim to an ancestor holding
+// files this transfer did not download.
+func legacyLocalRoot(files []TransferFile, remoteName string) string {
+	common := manifestDirs(files[0].Name)
+	for _, file := range files[1:] {
+		dirs := manifestDirs(file.Name)
+		if len(dirs) < len(common) {
+			common = common[:len(dirs)]
+		}
+		for i := range common {
+			if common[i] != dirs[i] {
+				common = common[:i]
+				break
+			}
+		}
+	}
+	if len(common) == 0 {
+		root, _, _ := strings.Cut(filepath.FromSlash(files[0].Name), string(filepath.Separator))
+		return root
+	}
+	if remoteName != "" {
+		name := filepath.Clean(filepath.FromSlash(remoteName))
+		for i := range common {
+			if filepath.Join(common[:i+1]...) == name {
+				return name
+			}
+		}
+	}
+	return filepath.Join(common...)
+}
+
+func manifestDirs(name string) []string {
+	parts := strings.Split(filepath.FromSlash(name), string(filepath.Separator))
+	return parts[:len(parts)-1]
+}
+
+// claimedRoot is the widest directory a manifest could own: its recorded root,
+// or the shared first component of a legacy array whose root was never written
+// down. Collision detection uses it so a narrower reading of one record can
+// never hide an overlap with another.
+func (manifest LocalManifest) claimedRoot() string {
+	if manifest.LocalRoot != "" || len(manifest.Files) == 0 {
+		return manifest.LocalRoot
+	}
+	root, _, _ := strings.Cut(filepath.FromSlash(manifest.Files[0].Name), string(filepath.Separator))
+	return root
 }
 
 // ManifestCheck selects how much local evidence a manifest read requires.
@@ -142,7 +193,9 @@ func (m *Manager) readManifests() *manifestSnapshot {
 		}
 		manifest, err := m.transferFiles.loadManifest(id)
 		if err == nil {
-			manifest, err = manifest.resolve()
+			// Validate without adopting an inferred root: only the transfer
+			// being read supplies the remote name that resolves a legacy claim.
+			_, err = manifest.resolve("")
 		}
 		if err != nil {
 			snapshot.errors[id] = err
@@ -175,7 +228,8 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 	// Latest poll metadata is explicit in the result, independent of the stored
 	// processing-time name. Reading never rewrites the ownership record.
 	manifest.RemoteName = transfer.Name
-	manifest, err := manifest.resolve()
+	claim := manifest.claimedRoot()
+	manifest, err := manifest.resolve(transfer.Name)
 	if err != nil || len(manifest.Files) == 0 {
 		return manifest, err
 	}
@@ -184,7 +238,7 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 		return manifest, fmt.Errorf("unsafe manifest category %q", category)
 	}
 	localRoot := filepath.Join(category, manifest.LocalRoot)
-	if err := s.checkManifestCollision(transfer.ID, localRoot); err != nil {
+	if err := s.checkManifestCollision(transfer.ID, filepath.Join(category, claim)); err != nil {
 		return manifest, err
 	}
 	root, err := os.OpenRoot(s.targetDir)
@@ -253,7 +307,7 @@ func (s *manifestSnapshot) checkManifestCollision(id int64, root string) error {
 		if category != "" && !safeManifestPath(category) {
 			return fmt.Errorf("unsafe category for manifest %d", otherID)
 		}
-		otherRoot := filepath.Join(category, other.LocalRoot)
+		otherRoot := filepath.Join(category, other.claimedRoot())
 		// Conservatively reject case-only aliases on both case-sensitive and
 		// case-insensitive volumes. Ancestor claims also collide across categories.
 		a, b := strings.ToLower(root), strings.ToLower(otherRoot)
@@ -276,35 +330,19 @@ func sortedManifestIDs[V any](m map[int64]V) []int64 {
 	return ids
 }
 
-// ManifestLocalRoots reports the local root each persisted manifest owns.
-// Reconciliation needs this to keep a transfer whose remote name has drifted
-// from being classified as unmanaged local data. Unreadable ownership evidence
-// fails closed rather than silently shrinking the protected set.
-func ManifestLocalRoots(targetDir string) (map[int64]string, error) {
-	store := newTransferFileStore(targetDir)
-	entries, err := os.ReadDir(store.stateDir)
-	if os.IsNotExist(err) {
-		return nil, nil
+// ManifestLocalRoot reports the local root one transfer's persisted manifest
+// owns. Reconciliation needs it to keep a transfer whose remote name has
+// drifted from being classified as unmanaged local data. Unreadable ownership
+// evidence fails closed rather than silently shrinking the protected set.
+func ManifestLocalRoot(targetDir string, transfer *putio.Transfer) (string, error) {
+	manifest, err := newTransferFileStore(targetDir).loadManifest(transfer.ID)
+	if err == nil {
+		manifest, err = manifest.resolve(transfer.Name)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read manifest ownership: %w", err)
+		return "", fmt.Errorf("manifest ownership for transfer %d: %w", transfer.ID, err)
 	}
-	roots := make(map[int64]string, len(entries))
-	for _, entry := range entries {
-		id, err := strconv.ParseInt(strings.TrimSuffix(entry.Name(), ".json"), 10, 64)
-		if err != nil || id <= 0 || entry.Name() != strconv.FormatInt(id, 10)+".json" {
-			continue
-		}
-		manifest, err := store.loadManifest(id)
-		if err == nil {
-			manifest, err = manifest.resolve()
-		}
-		if err != nil {
-			return nil, fmt.Errorf("manifest ownership for transfer %d: %w", id, err)
-		}
-		roots[id] = manifest.LocalRoot
-	}
-	return roots, nil
+	return manifest.LocalRoot, nil
 }
 
 // prepareManifest retains an existing claim across retries/restarts. A changed
