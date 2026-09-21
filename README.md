@@ -609,10 +609,26 @@ manifest is reconstructed by scanning the download directory, and no files are
 moved or deleted by these checks. Existing review and removal operations remain
 separate.
 
+A transfer with no manifest owns nothing, but `torrent-remove` with
+`delete-local-data` still falls back to deleting the directory its current
+remote name points at. That candidate path is validated exactly like a recorded
+root before anything is removed, remotely or locally: an absent manifest is not
+ownership proof, so a name resolving onto a directory another transfer's
+manifest claims — including category ancestors and case-only aliases — refuses
+the whole request with `nothing was removed`, naming the conflicting transfer ID
+and root, and preserves every record and payload. A name that claims nothing is
+still removed as before. Two transfers with duplicate or overlapping names need
+operator resolution — remove or rename one side, or write an explicit
+`localRoot` — since plundrio never renames directories, reassigns ownership or
+rewrites manifests to break the tie.
+
 ### Corrupt manifest ownership
 
 An unreadable or malformed `.plundrio-files/<id>.json` still claims a local root,
-and that claim cannot safely be excluded. Ownership therefore fails closed: while
+and that claim cannot safely be excluded. A record whose entries name several
+different first components is malformed in the same sense: it holds files in
+more than one local root and cannot say which one it owns, so it is never read
+as a claim on just one of them. Ownership therefore fails closed: while
 such a file exists, `torrent-get` file listings and local-data deletion are
 refused for every transfer in that download root, not only the corrupt one.
 Reconciliation reads each listed transfer's own record and refuses when that
@@ -648,9 +664,13 @@ source-present polls, mixed responses, refusal cases, atomic manifest
 publication, removal of the owned root without touching another transfer's data,
 removal refused with zero mutations when a legacy root is ambiguous (including
 when the remote was renamed to the parent directory), removal of a transfer
-queued before its first local byte, post-import metadata retention with its
-drifted-name and restart counter-cases, and reconciliation of drifted and
-orphaned ownership records. Integrity assertions check retained file
+queued before its first local byte, removal refused with zero mutations for a
+manifest-less transfer whose remote name resolves onto another transfer's owned
+root (with the unclaimed-name control that still removes), a malformed record
+holding several local roots failing closed for every transfer reachable through
+them in both entry orders, post-import metadata retention with its drifted-name
+and restart counter-cases, and reconciliation of drifted and orphaned ownership
+records. Integrity assertions check retained file
 identity, contents, paths, permissions, modification times, and manifest bytes.
 
 Before the fix, the public RPC reproduction on upstream `73905f2` fails only its

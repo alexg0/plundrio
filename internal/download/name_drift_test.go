@@ -460,3 +460,59 @@ func TestManifestNameDriftAmbiguousRecordStillGuardsOthers(t *testing.T) {
 	}
 	driftUnchanged(t, m.cfg.TargetDir, before)
 }
+
+// A record listing several local roots is structurally invalid rather than
+// merely ambiguous: it cannot express its own claim, so every transfer that
+// would otherwise claim one of those roots must fail closed instead of
+// silently taking the root the broken record left unguarded.
+func TestManifestMalformedMultipleRootsGuardsEveryRoot(t *testing.T) {
+	for _, malformed := range []string{
+		`[{"name":"a/first.epub","length":3},{"name":"b/owned.epub","length":3}]`,
+		`[{"name":"b/owned.epub","length":3},{"name":"a/first.epub","length":3}]`,
+	} {
+		t.Run(malformed, func(t *testing.T) {
+			m := newManagerForTest(t, nil)
+			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", malformed)
+			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/202.json", `[{"name":"b/second.epub","length":3}]`)
+			driftWrite(t, m.cfg.TargetDir, "a/first.epub", "one")
+			driftWrite(t, m.cfg.TargetDir, "b/owned.epub", "two")
+			driftWrite(t, m.cfg.TargetDir, "b/second.epub", "thr")
+			before := driftSnapshot(t, m.cfg.TargetDir)
+			for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+				if _, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "a"}, check); err == nil || !strings.Contains(err.Error(), "share one local root") {
+					t.Fatalf("check %d: malformed record accepted: %v", check, err)
+				}
+				manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 202, Name: "b"}, check)
+				if err == nil || !strings.Contains(err.Error(), "manifest 101") || !strings.Contains(err.Error(), "share one local root") {
+					t.Fatalf("check %d: competing claim on %q was lost: %+v %v", check, "b", manifest, err)
+				}
+			}
+			driftUnchanged(t, m.cfg.TargetDir, before)
+		})
+	}
+}
+
+// A transfer without a manifest owns nothing. Its remote name is not ownership
+// proof, so it may never resolve onto a root another record already claims.
+func TestManifestNameDriftManifestlessTransferClaimsNothing(t *testing.T) {
+	m := newManagerForTest(t, nil)
+	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", `[{"name":"Show/ep1.mkv","length":3}]`)
+	driftWrite(t, m.cfg.TargetDir, "Show/ep1.mkv", "one")
+	driftWrite(t, m.cfg.TargetDir, "Other/loose.mkv", "two")
+	before := driftSnapshot(t, m.cfg.TargetDir)
+	for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+		manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 202, Name: "Show"}, check)
+		if err == nil || !strings.Contains(err.Error(), "collides with transfer 101") {
+			t.Fatalf("check %d: manifest-less transfer claimed an owned root: %+v %v", check, manifest, err)
+		}
+		if manifest.LocalRoot != "" {
+			t.Fatalf("check %d: refused transfer still reported ownership %q", check, manifest.LocalRoot)
+		}
+		// An unclaimed name resolves, but still records no ownership.
+		manifest, err = m.GetTransferManifest(&putio.Transfer{ID: 202, Name: "Other"}, check)
+		if err != nil || manifest.LocalRoot != "" || len(manifest.Files) != 0 {
+			t.Fatalf("check %d: unclaimed name failed closed: %+v %v", check, manifest, err)
+		}
+	}
+	driftUnchanged(t, m.cfg.TargetDir, before)
+}

@@ -52,7 +52,8 @@ func (manifest LocalManifest) validateFiles() error {
 		return fmt.Errorf("invalid manifest transfer ID %d", manifest.TransferID)
 	}
 	seen := make(map[string]bool, len(manifest.Files))
-	for _, file := range manifest.Files {
+	shared := ""
+	for i, file := range manifest.Files {
 		name := filepath.FromSlash(file.Name)
 		if !safeManifestPath(name) || file.Length < 0 {
 			return fmt.Errorf("unsafe manifest entry %q (length %d)", file.Name, file.Length)
@@ -60,6 +61,15 @@ func (manifest LocalManifest) validateFiles() error {
 		root, _, hasFile := strings.Cut(name, string(filepath.Separator))
 		if !hasFile || IsReservedTransferName(root) {
 			return fmt.Errorf("unsafe manifest root in %q", file.Name)
+		}
+		// One manifest owns one local root. A record listing several is
+		// structurally invalid, not ambiguous: its widest claim cannot be
+		// expressed, so it must fail closed rather than reserve one root and
+		// leave the rest open for another transfer to claim and delete.
+		if i == 0 {
+			shared = root
+		} else if root != shared {
+			return fmt.Errorf("manifest files do not share one local root (%q and %q)", shared, root)
 		}
 		if seen[name] {
 			return fmt.Errorf("duplicate manifest file %q", file.Name)
@@ -96,23 +106,12 @@ func safeManifestPath(path string) bool {
 // display name is not evidence, so ownership is refused instead of inferred.
 func legacyLocalRoot(files []TransferFile) (string, error) {
 	root, _, _ := strings.Cut(filepath.FromSlash(files[0].Name), string(filepath.Separator))
-	proven := false
 	for _, file := range files {
-		dirs := manifestDirs(file.Name)
-		if len(dirs) == 0 || dirs[0] != root {
-			return "", fmt.Errorf("legacy manifest files do not share one local root")
+		if strings.Count(filepath.FromSlash(file.Name), string(filepath.Separator)) == 1 {
+			return root, nil
 		}
-		proven = proven || len(dirs) == 1
 	}
-	if !proven {
-		return "", fmt.Errorf("ambiguous legacy manifest root below %q", root)
-	}
-	return root, nil
-}
-
-func manifestDirs(name string) []string {
-	parts := strings.Split(filepath.FromSlash(name), string(filepath.Separator))
-	return parts[:len(parts)-1]
+	return "", fmt.Errorf("ambiguous legacy manifest root below %q", root)
 }
 
 // claimedRoot is the widest directory a manifest could own: its recorded root,
@@ -233,6 +232,18 @@ func (s *manifestSnapshot) GetTransferManifest(transfer *putio.Transfer, check M
 	return s.validateManifest(transfer, manifest, check)
 }
 
+// deletionCandidate is the directory a manifest-less removal would delete: the
+// transfer's remote name resolved under the download root, exactly as
+// deleteLocalData resolves it. A name that cannot land inside the root deletes
+// nothing and therefore claims nothing.
+func (s *manifestSnapshot) deletionCandidate(name string) (string, bool) {
+	rel, err := filepath.Rel(s.targetDir, filepath.Join(s.targetDir, filepath.FromSlash(name)))
+	if err != nil || !safeManifestPath(rel) || IsReservedTransferName(strings.Split(rel, string(filepath.Separator))[0]) {
+		return "", false
+	}
+	return rel, true
+}
+
 func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest LocalManifest, check ManifestCheck) (LocalManifest, error) {
 	if s.scanErr != nil {
 		return manifest, s.scanErr
@@ -245,19 +256,31 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 	manifest.RemoteName = transfer.Name
 	claim := manifest.claimedRoot()
 	manifest, err := manifest.resolve()
-	if err != nil || len(manifest.Files) == 0 {
+	if err != nil {
 		return manifest, err
 	}
 	category := s.categories[transfer.ID]
 	if category != "" && !safeManifestPath(category) {
 		return manifest, fmt.Errorf("unsafe manifest category %q", category)
 	}
+	owned := len(manifest.Files) > 0
 	localRoot := filepath.Join(category, manifest.LocalRoot)
+	// A transfer without a manifest owns nothing, yet removal still falls back
+	// to deleting the directory its remote name points at. That candidate is
+	// not ownership evidence, so it must clear every other record's claim and
+	// the same confinement and symlink checks before it can be used.
+	if !owned {
+		candidate, deletable := s.deletionCandidate(transfer.Name)
+		if !deletable {
+			return manifest, nil
+		}
+		claim, localRoot = candidate, filepath.Join(category, candidate)
+	}
 	if err := s.checkManifestCollision(transfer.ID, filepath.Join(category, claim)); err != nil {
 		return manifest, err
 	}
 	root, err := os.OpenRoot(s.targetDir)
-	if os.IsNotExist(err) && check == ManifestCheckPending && manifest.LocalRoot == transfer.Name {
+	if os.IsNotExist(err) && (!owned || (check == ManifestCheckPending && manifest.LocalRoot == transfer.Name)) {
 		return manifest, nil // The ordinary first download creates the target.
 	}
 	if err != nil {
@@ -267,7 +290,7 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 	// An unchanged-name transfer may not have created its root yet, and an
 	// importer may have moved the finished payload out and removed it again.
 	// Name drift always requires the root; never create a replacement for it.
-	rootRequired := check == ManifestCheckComplete || manifest.LocalRoot != transfer.Name
+	rootRequired := owned && (check == ManifestCheckComplete || manifest.LocalRoot != transfer.Name)
 	if err := checkManifestPath(root, localRoot, true, rootRequired, 0, check); err != nil {
 		return manifest, err
 	}

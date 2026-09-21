@@ -366,3 +366,108 @@ func localUnchanged(t *testing.T, root string, before map[string]string) {
 		t.Fatalf("local filesystem changed:\nbefore=%v\nafter=%v", before, after)
 	}
 }
+
+// A transfer with no manifest owns no local data. Removal still falls back to
+// its remote name, so that candidate must clear every recorded claim first:
+// deleting another transfer's payload is never a valid interpretation of an
+// absent manifest, while an unclaimed name stays removable as before.
+func TestTorrentRemoveManifestlessTransferRefusesOwnedRoot(t *testing.T) {
+	root := t.TempDir()
+	writeManifestFixture(t, root, ".plundrio-files/101.json", []byte(`[{"name":"Show/ep1.mkv","length":3}]`))
+	writeManifestFixture(t, root, "Show/ep1.mkv", []byte("one"))
+	writeManifestFixture(t, root, "Solo/leftover.bin", []byte("old"))
+	before := localSnapshot(t, root)
+
+	cfg := &config.Config{TargetDir: root}
+	transfers := []*putio.Transfer{
+		{ID: 101, Hash: "ABC123", Name: "Show", FileID: 501, Status: "COMPLETED", PercentDone: 100},
+		{ID: 202, Hash: "DEF456", Name: "Show", FileID: 502, Status: "DOWNLOADING"},
+		{ID: 303, Hash: "AAA789", Name: "Solo", FileID: 503, Status: "DOWNLOADING"},
+	}
+	client := &torrentAddClient{transfers: transfers}
+	manager := download.New(cfg, nil)
+	srv := &Server{cfg: cfg, client: client, dlService: &manifestRPCService{Manager: manager, transfers: transfers}}
+
+	_, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[202],"delete-local-data":true}`))
+	if err == nil || !strings.Contains(err.Error(), "establish local ownership for transfer 202; nothing was removed") || !strings.Contains(err.Error(), "collides with transfer 101") {
+		t.Fatalf("manifest-less removal did not refuse another transfer's root: %v", err)
+	}
+	if len(client.deleted) != 0 || len(client.deletedFiles) != 0 {
+		t.Fatalf("refused removal still mutated Put.io: transfers=%v files=%v", client.deleted, client.deletedFiles)
+	}
+	if manager.RemovalPending(202) {
+		t.Fatal("refused removal published a removal marker")
+	}
+	localUnchanged(t, root, before)
+
+	// Control: the same manifest-less path still removes an unclaimed root.
+	if _, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[303],"delete-local-data":true}`)); err != nil {
+		t.Fatalf("manifest-less removal of an unclaimed root refused: %v", err)
+	}
+	if len(client.deleted) != 1 || client.deleted[0] != 303 {
+		t.Fatalf("unclaimed removal did not delete the remote transfer: %v", client.deleted)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "Solo")); !os.IsNotExist(err) {
+		t.Fatalf("unclaimed local root survived removal: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "Show/ep1.mkv")); err != nil || string(data) != "one" {
+		t.Fatalf("removal touched the owned root: %q %v", data, err)
+	}
+}
+
+// A stored record naming several local roots cannot say what it owns. Every
+// transfer reachable through those roots must fail closed, over both selector
+// forms and through removal, rather than one of them quietly taking a root the
+// broken record still holds files in.
+func TestManifestMalformedMultipleRootsRPCAndRemoval(t *testing.T) {
+	for _, malformed := range []string{
+		`[{"name":"a/first.epub","length":3},{"name":"b/owned.epub","length":3}]`,
+		`[{"name":"b/owned.epub","length":3},{"name":"a/first.epub","length":3}]`,
+	} {
+		t.Run(malformed, func(t *testing.T) {
+			root := t.TempDir()
+			writeManifestFixture(t, root, ".plundrio-files/101.json", []byte(malformed))
+			writeManifestFixture(t, root, ".plundrio-files/202.json", []byte(`[{"name":"b/second.epub","length":3}]`))
+			writeManifestFixture(t, root, "a/first.epub", []byte("one"))
+			writeManifestFixture(t, root, "b/owned.epub", []byte("two"))
+			writeManifestFixture(t, root, "b/second.epub", []byte("thr"))
+			before := localSnapshot(t, root)
+
+			cfg := &config.Config{TargetDir: root}
+			transfers := []*putio.Transfer{
+				{ID: 101, Hash: "ABC123", Name: "a", FileID: 501, Status: "COMPLETED", PercentDone: 100},
+				{ID: 202, Hash: "DEF456", Name: "b", FileID: 502, Status: "COMPLETED", PercentDone: 100},
+			}
+			client := &torrentAddClient{transfers: transfers}
+			manager := download.New(cfg, nil)
+			srv := &Server{cfg: cfg, client: client, dlService: &manifestRPCService{Manager: manager, transfers: transfers}}
+
+			for _, ids := range []string{``, `"ids":[101,"def456"],`} {
+				torrents := manifestRPC(t, srv, `{`+ids+`"fields":["id","name","files","error","errorString"]}`)
+				if len(torrents) != 2 {
+					t.Fatalf("lost transfers: %+v", torrents)
+				}
+				for _, torrent := range torrents {
+					if torrent.Error != trErrorLocal || !strings.Contains(torrent.ErrorString, "share one local root") || torrent.Files == nil || len(torrent.Files) != 0 {
+						t.Fatalf("malformed inventory was not reported: %+v", torrent)
+					}
+				}
+				if !strings.Contains(torrents[1].ErrorString, "manifest 101") {
+					t.Fatalf("competing transfer did not name the broken record: %+v", torrents[1])
+				}
+			}
+
+			_, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[202],"delete-local-data":true}`))
+			if err == nil || !strings.Contains(err.Error(), "establish local ownership for transfer 202; nothing was removed") || !strings.Contains(err.Error(), "manifest 101") {
+				t.Fatalf("removal proceeded against a malformed competing record: %v", err)
+			}
+			if len(client.deleted) != 0 || len(client.deletedFiles) != 0 {
+				t.Fatalf("refused removal still mutated Put.io: transfers=%v files=%v", client.deleted, client.deletedFiles)
+			}
+			if manager.RemovalPending(202) {
+				t.Fatal("refused removal published a removal marker")
+			}
+			localUnchanged(t, root, before)
+		})
+	}
+}
