@@ -555,14 +555,23 @@ on name changes. New downloads store a version-1 object with `transferId`,
 `hash` (when available), `localRoot`, `remoteName`, and `files`. `localRoot` is
 the processing-time path; stored `remoteName` records the observation at creation.
 Readers pair that local root with the latest poll's remote name without changing
-the ownership record. A legacy array records no root at all, so a read without
-the remote listing takes the deepest directory every entry shares, unless the
-current remote name still matches a shallower shared directory. The claim is
-therefore never widened to a parent directory holding files the transfer did not
-download: for `old-root/book/file.epub` under the name `old-root` the root stays
-`old-root`, while under a drifted name it narrows to `old-root/book`. Reported
-`files` names are unchanged either way, and `downloadDir` plus the reported name
-still contains them.
+the ownership record. A legacy array records no root at all, only file paths.
+Since manifest entries are written as `<root>/<file>`, a read without the remote
+listing accepts the shared first component exactly when some entry sits directly
+inside it: `old-root/file.epub` proves the root `old-root`, and that root is kept
+across any later remote rename. Entries that all sit deeper, such as
+`old-root/book/file.epub`, record no boundary between the root and the
+directories inside it, so ownership is refused for that transfer rather than
+inferred — a current remote name equal to `old-root` or to `old-root/book` is
+display metadata, never proof. Refusal reports `error=3` with an
+`ambiguous legacy manifest root below "old-root"` explanation, deletes and moves
+nothing, and leaves the manifest byte-identical; `reconcile` fails closed for
+that run rather than treating the files as unmanaged. Repair one such record by
+writing a version-1 object with an explicit `localRoot`, or let a source-present
+retry reconstruct the exact root from the remote listing. An ambiguous record
+still blocks any other transfer from claiming the same directory, and unrelated
+transfers keep working. Reported `files` names are never rewritten, and
+`downloadDir` plus the reported name still contains them.
 
 For source-present retries, the complete remote file list must match the stored
 names and sizes; this reconstructs the exact legacy root without using the current
@@ -573,8 +582,10 @@ next poll while reprocess attempts remain (three per process). Once they are
 exhausted the transfer is left alone until the process restarts, since retry
 bookkeeping is in-memory only and a restart resets that budget.
 
-Ownership is re-read from disk on every poll and on every files-inclusive
-`torrent-get`, with no cached ownership index: a stale cache could authorize a
+Ownership is re-read from disk on every poll and on every `torrent-get`,
+including ID-only requests, since the reported name comes from the manifest;
+a restart additionally re-reads it once per transfer as it is first processed.
+There is no cached ownership index: a stale cache could authorize a
 deletion the manifests no longer support. The cost is one directory scan plus one
 read per manifest per request, which is bounded by the number of tracked
 transfers.
@@ -585,9 +596,15 @@ entries, traversal, symlinks in state or payload paths, and competing root claim
 have missing/partial files; completed restoration requires every recorded file
 to be regular and exactly the expected length. Size checks do not prove content
 integrity. A transfer this instance already processed keeps reporting its stored
-metadata while its local root is present, since an Arr import renames, moves or
-truncates the payload; root presence, ownership, confinement and symlink checks
-stay strict, and a cleaned restart still requires every recorded file. No missing
+metadata after an Arr import renames, moves or truncates the payload, including
+the case where the import took the last child and removed the owned root itself.
+That tolerance is limited to an unchanged remote name in the process that
+performed the download: once the name has drifted, the root must exist, and a
+restarted instance that no longer tracks the transfer requires every recorded
+file at its exact length. Removing a transfer whose root was never created —
+queued or cancelled before the first local byte, name unchanged — deletes the
+remote records and nothing locally, and never creates a substitute root.
+Ownership, collision, confinement and symlink checks stay strict in every mode. No missing
 manifest is reconstructed by scanning the download directory, and no files are
 moved or deleted by these checks. Existing review and removal operations remain
 separate.
@@ -628,9 +645,12 @@ and mock Put.io data, exercise the public HTTP RPC handler without a listening
 server, and need no credentials, media, or external services. They cover
 unchanged-name and ID-only controls, numeric/hash selectors, restart and
 source-present polls, mixed responses, refusal cases, atomic manifest
-publication, removal that keeps unmanaged siblings and another transfer's data,
-removal refused before any remote or local mutation, and reconciliation of
-drifted and orphaned ownership records. Integrity assertions check retained file
+publication, removal of the owned root without touching another transfer's data,
+removal refused with zero mutations when a legacy root is ambiguous (including
+when the remote was renamed to the parent directory), removal of a transfer
+queued before its first local byte, post-import metadata retention with its
+drifted-name and restart counter-cases, and reconciliation of drifted and
+orphaned ownership records. Integrity assertions check retained file
 identity, contents, paths, permissions, modification times, and manifest bytes.
 
 Before the fix, the public RPC reproduction on upstream `73905f2` fails only its

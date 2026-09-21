@@ -14,7 +14,10 @@ import (
 	"github.com/elsbrock/plundrio/internal/config"
 )
 
-const legacyDriftManifest = `[{"name":"old-root/book/file.epub","length":4}]`
+const (
+	legacyDriftManifest = `[{"name":"old-root/file.epub","length":4}]`
+	nestedDriftManifest = `{"version":1,"transferId":101,"localRoot":"old-root/book","remoteName":"old-root/book","files":[{"name":"old-root/book/file.epub","length":4}]}`
+)
 
 func driftWrite(t *testing.T, root, path, contents string) {
 	t.Helper()
@@ -84,21 +87,23 @@ func TestManifestNameDriftSafety(t *testing.T) {
 			}
 		}, wantErr: "stat manifest path"},
 		{name: "missing child", setup: func(t *testing.T, m *Manager) {
-			if err := os.Remove(filepath.Join(m.cfg.TargetDir, "old-root/book/file.epub")); err != nil {
+			if err := os.Remove(filepath.Join(m.cfg.TargetDir, "old-root/file.epub")); err != nil {
 				t.Fatal(err)
 			}
 		}, wantErr: "stat manifest path"},
 		{name: "malformed", manifest: `{`, wantErr: "parse transfer file state"},
 		{name: "empty", manifest: `[]`, wantErr: "empty"},
 		{name: "null", manifest: `null`, wantErr: "invalid manifest"},
-		{name: "duplicate", manifest: `[{"name":"old-root/book/file.epub","length":4},{"name":"old-root/book/file.epub","length":4}]`, wantErr: "duplicate"},
-		{name: "multiple roots", manifest: `[{"name":"old-root/book/file.epub","length":4},{"name":"other-root/book.epub","length":4}]`, wantErr: "outside local root"},
+		{name: "duplicate", manifest: `[{"name":"old-root/file.epub","length":4},{"name":"old-root/file.epub","length":4}]`, wantErr: "duplicate"},
+		{name: "multiple roots", manifest: `[{"name":"old-root/file.epub","length":4},{"name":"other-root/book.epub","length":4}]`, wantErr: "share one local root"},
+		{name: "ambiguous legacy root", manifest: `[{"name":"old-root/book/file.epub","length":4}]`, wantErr: `ambiguous legacy manifest root below "old-root"`},
+		{name: "ambiguous legacy sibling roots", manifest: `[{"name":"old-root/book/file.epub","length":4},{"name":"old-root/art/cover.jpg","length":5}]`, wantErr: `ambiguous legacy manifest root below "old-root"`},
 		{name: "traversal", manifest: `[{"name":"../outside/file.epub","length":4}]`, wantErr: "unsafe"},
 		{name: "cleaned traversal", manifest: `[{"name":"old-root/book/../file.epub","length":4}]`, wantErr: "unsafe"},
 		{name: "absolute", manifest: `[{"name":"/outside/file.epub","length":4}]`, wantErr: "unsafe"},
 		{name: "reserved", manifest: `[{"name":".PLUNDRIO-FILES/file.epub","length":4}]`, wantErr: "unsafe"},
-		{name: "negative length", manifest: `[{"name":"old-root/book/file.epub","length":-1}]`, wantErr: "unsafe"},
-		{name: "wrong size", manifest: `[{"name":"old-root/book/file.epub","length":5}]`, wantErr: "expected length"},
+		{name: "negative length", manifest: `[{"name":"old-root/file.epub","length":-1}]`, wantErr: "unsafe"},
+		{name: "wrong size", manifest: `[{"name":"old-root/file.epub","length":5}]`, wantErr: "expected length"},
 		{name: "collision", setup: func(t *testing.T, m *Manager) {
 			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/202.json", `[{"name":"old-root/other.epub","length":5}]`)
 			driftWrite(t, m.cfg.TargetDir, "old-root/other.epub", "other")
@@ -114,7 +119,7 @@ func TestManifestNameDriftSafety(t *testing.T) {
 		{name: "wrong embedded ID", manifest: `{"version":1,"transferId":202,"localRoot":"old-root","files":[{"name":"old-root/book/file.epub","length":4}]}`, wantErr: "invalid manifest"},
 		{name: "wrong version", manifest: `{"version":2,"transferId":101,"localRoot":"old-root","files":[{"name":"old-root/book/file.epub","length":4}]}`, wantErr: "invalid manifest"},
 		{name: "wrong explicit root", manifest: `{"version":1,"transferId":101,"localRoot":"other-root","files":[{"name":"old-root/book/file.epub","length":4}]}`, wantErr: "outside local root"},
-		{name: "explicit nested root", manifest: `{"version":1,"transferId":101,"localRoot":"old-root/book","remoteName":"old-root/book","files":[{"name":"old-root/book/file.epub","length":4}]}`},
+		{name: "explicit nested root", manifest: nestedDriftManifest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newManagerForTest(t, nil)
@@ -123,6 +128,7 @@ func TestManifestNameDriftSafety(t *testing.T) {
 				data = legacyDriftManifest
 			}
 			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", data)
+			driftWrite(t, m.cfg.TargetDir, "old-root/file.epub", "book")
 			driftWrite(t, m.cfg.TargetDir, "old-root/book/file.epub", "book")
 			if tc.setup != nil {
 				tc.setup(t, m)
@@ -142,12 +148,22 @@ func TestManifestNameDriftSafety(t *testing.T) {
 }
 
 func TestManifestNameDriftRejectsSymlinks(t *testing.T) {
-	for _, component := range []string{"old-root", "old-root/book", "old-root/book/file.epub", ".plundrio-files/101.json", ".plundrio-files"} {
-		t.Run(component, func(t *testing.T) {
+	for _, tc := range []struct{ manifest, component string }{
+		{legacyDriftManifest, "old-root"},
+		{legacyDriftManifest, "old-root/file.epub"},
+		{legacyDriftManifest, ".plundrio-files/101.json"},
+		{legacyDriftManifest, ".plundrio-files"},
+		{nestedDriftManifest, "old-root"},
+		{nestedDriftManifest, "old-root/book"},
+		{nestedDriftManifest, "old-root/book/file.epub"},
+	} {
+		component := tc.component
+		t.Run(fmt.Sprintf("%s/%d", component, len(tc.manifest)), func(t *testing.T) {
 			m := newManagerForTest(t, nil)
 			external := t.TempDir()
 			for _, dir := range []string{m.cfg.TargetDir, external} {
-				driftWrite(t, dir, ".plundrio-files/101.json", legacyDriftManifest)
+				driftWrite(t, dir, ".plundrio-files/101.json", tc.manifest)
+				driftWrite(t, dir, "old-root/file.epub", "book")
 				driftWrite(t, dir, "old-root/book/file.epub", "book")
 			}
 			path := filepath.Join(m.cfg.TargetDir, component)
@@ -209,7 +225,7 @@ func TestManifestNameDriftPollAndRestart(t *testing.T) {
 					return []*putio.Transfer{{ID: 101, Hash: "ABC123", Name: currentName, FileID: fileID, SaveParentID: testFolderID, Status: "COMPLETED", PercentDone: 100, Size: 4}}, nil
 				},
 				files: func(int64) ([]*putio.File, error) {
-					return []*putio.File{{ID: 11, Name: "book/file.epub", Size: 4}}, nil
+					return []*putio.File{{ID: 11, Name: "file.epub", Size: 4}}, nil
 				},
 			}}
 			driftWrite(t, root, ".plundrio-files/101.json", legacyDriftManifest)
@@ -217,7 +233,7 @@ func TestManifestNameDriftPollAndRestart(t *testing.T) {
 			if complete {
 				contents = "book"
 			}
-			driftWrite(t, root, "old-root/book/file.epub", contents)
+			driftWrite(t, root, "old-root/file.epub", contents)
 			before := driftSnapshot(t, root)
 			m := New(cfg, client)
 			for _, phase := range []string{"initial poll", "renamed poll", "restart"} {
@@ -234,14 +250,7 @@ func TestManifestNameDriftPollAndRestart(t *testing.T) {
 				if complete {
 					wantState = TransferLifecycleProcessed
 				}
-				// A restart after the source is gone has neither the remote
-				// listing nor the original name, so the legacy array proves
-				// only the deepest directory its entries share.
-				wantCtxName := "old-root"
-				if complete && phase == "restart" {
-					wantCtxName = filepath.Join("old-root", "book")
-				}
-				if !ok || ctx.GetState() != wantState || ctx.Name != wantCtxName {
+				if !ok || ctx.GetState() != wantState || ctx.Name != "old-root" {
 					t.Fatalf("%s: context=%+v", phase, ctx)
 				}
 				transfer := m.GetTransfers()[0]
@@ -249,21 +258,14 @@ func TestManifestNameDriftPollAndRestart(t *testing.T) {
 				if complete {
 					check = ManifestCheckComplete
 				}
-				// Without the remote listing a legacy array only proves the
-				// deepest directory its entries share; the drifted name may no
-				// longer name any of them.
-				wantRoot := "old-root"
-				if currentName != "old-root" {
-					wantRoot = filepath.Join("old-root", "book")
-				}
 				manifest, err := m.GetTransferManifest(transfer, check)
-				if err != nil || manifest.LocalRoot != wantRoot || manifest.RemoteName != currentName {
+				if err != nil || manifest.LocalRoot != "old-root" || manifest.RemoteName != currentName {
 					t.Fatalf("%s: manifest=%+v err=%v", phase, manifest, err)
 				}
 				if !complete && phase != "renamed poll" {
 					select {
 					case job := <-m.jobs:
-						if job.Name != "old-root/book/file.epub" || job.TransferID != 101 {
+						if job.Name != "old-root/file.epub" || job.TransferID != 101 {
 							t.Fatalf("wrong download destination: %+v", job)
 						}
 					default:
@@ -315,7 +317,7 @@ func TestManifestNameDriftPreservesExplicitRoot(t *testing.T) {
 func TestManifestNameDriftRefusesChangedRemoteFiles(t *testing.T) {
 	m := newManagerForTest(t, nil)
 	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", legacyDriftManifest)
-	driftWrite(t, m.cfg.TargetDir, "old-root/book/file.epub", "book")
+	driftWrite(t, m.cfg.TargetDir, "old-root/file.epub", "book")
 	before := driftSnapshot(t, m.cfg.TargetDir)
 	_, err := m.prepareManifest(&putio.Transfer{ID: 101, Name: "new-root"}, []*putio.File{{ID: 11, Name: "other.epub", Size: 4}})
 	if err == nil || !strings.Contains(err.Error(), "differs from persisted manifest") {
@@ -346,7 +348,7 @@ func TestManifestNameDriftCategoryRestart(t *testing.T) {
 	root := t.TempDir()
 	driftWrite(t, root, ".plundrio-state.json", `{"101":"books"}`)
 	driftWrite(t, root, ".plundrio-files/101.json", legacyDriftManifest)
-	driftWrite(t, root, "books/old-root/book/file.epub", "book")
+	driftWrite(t, root, "books/old-root/file.epub", "book")
 	before := driftSnapshot(t, root)
 	m := New(&config.Config{TargetDir: root, UseCategoriesTarget: true}, &driftClient{t: t, fakeClient: &fakeClient{}})
 	m.categories.Load() // The same persistence step performed by Manager.Start.
@@ -412,23 +414,49 @@ func TestManifestNameDriftPreservesLegacyRoot(t *testing.T) {
 	driftUnchanged(t, m.cfg.TargetDir, before)
 }
 
-// A legacy array whose files all sit in one subdirectory must never be read as
-// owning the parent, which also holds another season this transfer never
-// downloaded.
+// A legacy array whose files all sit below one subdirectory records no boundary
+// between the transfer root and the directories inside it, so no read may claim
+// either the subdirectory or the parent that also holds another season this
+// transfer never downloaded. The current remote name, even when it equals one
+// of those directories, is not evidence of the boundary.
 func TestManifestNameDriftNeverClaimsSiblingAncestor(t *testing.T) {
-	for _, name := range []string{"Show/S01", "renamed"} {
+	for _, name := range []string{"Show/S01", "renamed", "Show"} {
 		t.Run(name, func(t *testing.T) {
 			m := newManagerForTest(t, nil)
 			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", `[{"name":"Show/S01/ep1.mkv","length":3},{"name":"Show/S01/ep2.mkv","length":3}]`)
 			driftWrite(t, m.cfg.TargetDir, "Show/S01/ep1.mkv", "one")
 			driftWrite(t, m.cfg.TargetDir, "Show/S01/ep2.mkv", "two")
 			driftWrite(t, m.cfg.TargetDir, "Show/S02/ep3.mkv", "thr")
+			driftWrite(t, m.cfg.TargetDir, "Show/poster.jpg", "img")
 			before := driftSnapshot(t, m.cfg.TargetDir)
-			manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: name}, ManifestCheckComplete)
-			if err != nil || manifest.LocalRoot != filepath.Join("Show", "S01") || len(manifest.Files) != 2 {
-				t.Fatalf("legacy root = %+v, err = %v", manifest, err)
+			for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+				manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: name}, check)
+				if err == nil || !strings.Contains(err.Error(), `ambiguous legacy manifest root below "Show"`) {
+					t.Fatalf("check %d: manifest = %+v, err = %v", check, manifest, err)
+				}
 			}
 			driftUnchanged(t, m.cfg.TargetDir, before)
 		})
 	}
+}
+
+// An ambiguous record still guards the roots other transfers may claim instead
+// of failing every unrelated transfer closed.
+func TestManifestNameDriftAmbiguousRecordStillGuardsOthers(t *testing.T) {
+	m := newManagerForTest(t, nil)
+	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", `[{"name":"Show/S01/ep1.mkv","length":3}]`)
+	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/202.json", `[{"name":"Show/other.mkv","length":3}]`)
+	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/303.json", `[{"name":"other-root/file.epub","length":4}]`)
+	driftWrite(t, m.cfg.TargetDir, "Show/S01/ep1.mkv", "one")
+	driftWrite(t, m.cfg.TargetDir, "Show/other.mkv", "two")
+	driftWrite(t, m.cfg.TargetDir, "other-root/file.epub", "book")
+	before := driftSnapshot(t, m.cfg.TargetDir)
+	if _, err := m.GetTransferManifest(&putio.Transfer{ID: 202, Name: "renamed"}, ManifestCheckComplete); err == nil || !strings.Contains(err.Error(), "collides with transfer 101") {
+		t.Fatalf("ambiguous record stopped guarding its claim: %v", err)
+	}
+	manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 303, Name: "renamed"}, ManifestCheckComplete)
+	if err != nil || manifest.LocalRoot != "other-root" {
+		t.Fatalf("unrelated transfer failed closed: %+v %v", manifest, err)
+	}
+	driftUnchanged(t, m.cfg.TargetDir, before)
 }

@@ -138,14 +138,38 @@ func TestHandleTorrentGetKeepsProcessedMetadataAfterImport(t *testing.T) {
 		t.Fatalf("processed transfer lost removal eligibility after import: %+v", torrents)
 	}
 
-	// The owned root itself is still required evidence.
+	// Importers that move the last child out may remove the root with it. While
+	// this instance still tracks the transfer as processed and its remote name
+	// has not drifted, that is a completed import, not lost ownership.
 	if err := os.Remove(filepath.Join(root, "Book")); err != nil {
 		t.Fatal(err)
 	}
 	torrents = manifestRPC(t, &Server{cfg: cfg, dlService: service},
-		`{"ids":[101],"fields":["id","files","error","errorString"]}`)
-	if len(torrents) != 1 || torrents[0].Error != trErrorLocal {
-		t.Fatalf("absent local root was accepted: %+v", torrents)
+		`{"ids":[101],"fields":["id","name","files","error","errorString"]}`)
+	if len(torrents) != 1 || torrents[0].Error != 0 || torrents[0].Name != "Book" ||
+		len(torrents[0].Files) != 1 || torrents[0].Files[0].Name != "Book/book.m4b" {
+		t.Fatalf("imported-away root dropped historical metadata: %+v", torrents)
+	}
+
+	// A drifted remote name may not substitute a new root for the missing one,
+	// and a restarted instance that no longer tracks the transfer must not
+	// report completion it cannot see.
+	transfer.Name = "Renamed Book"
+	torrents = manifestRPC(t, &Server{cfg: cfg, dlService: service},
+		`{"ids":[101],"fields":["id","name","files","error","errorString"]}`)
+	if len(torrents) != 1 || torrents[0].Error != trErrorLocal || !strings.Contains(torrents[0].ErrorString, "stat manifest path") {
+		t.Fatalf("drifted name accepted an absent local root: %+v", torrents)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "Renamed Book")); !os.IsNotExist(err) {
+		t.Fatalf("drifted name created a substitute root: %v", err)
+	}
+	transfer.Name = "Book"
+	restarted := &manifestRPCService{Manager: download.New(cfg, nil), transfers: []*putio.Transfer{transfer}}
+	torrents = manifestRPC(t, &Server{cfg: cfg, dlService: restarted},
+		`{"ids":[101],"fields":["id","name","files","error","errorString","status","seedIdleMode","percentDone"]}`)
+	if len(torrents) != 1 || torrents[0].PercentDone >= 1 || torrents[0].Status == trStatusSeed ||
+		torrents[0].SeedIdleMode != transmissionLimitModeUnlimited {
+		t.Fatalf("restart reported local completion it cannot see: %+v", torrents)
 	}
 }
 

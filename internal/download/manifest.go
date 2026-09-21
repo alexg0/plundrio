@@ -23,36 +23,67 @@ type LocalManifest struct {
 	Files      []TransferFile `json:"files"`
 }
 
-func (manifest LocalManifest) resolve(remoteName string) (LocalManifest, error) {
-	if manifest.TransferID <= 0 {
-		return manifest, fmt.Errorf("invalid manifest transfer ID %d", manifest.TransferID)
+func (manifest LocalManifest) resolve() (LocalManifest, error) {
+	if err := manifest.validateFiles(); err != nil {
+		return manifest, err
 	}
 	if manifest.LocalRoot == "" && len(manifest.Files) > 0 {
-		manifest.LocalRoot = legacyLocalRoot(manifest.Files, remoteName)
+		root, err := legacyLocalRoot(manifest.Files)
+		if err != nil {
+			return manifest, err
+		}
+		manifest.LocalRoot = root
 	}
-	if manifest.LocalRoot != "" && (!safeManifestPath(manifest.LocalRoot) || IsReservedTransferName(strings.Split(manifest.LocalRoot, string(filepath.Separator))[0])) {
-		return manifest, fmt.Errorf("unsafe manifest root %q", manifest.LocalRoot)
+	return manifest, manifest.validateRoot()
+}
+
+// validate accepts a stored record whose legacy root cannot be resolved: its
+// widest claim still guards other transfers even while its own boundary is
+// unknown, and only the transfer itself is refused.
+func (manifest LocalManifest) validate() (LocalManifest, error) {
+	if err := manifest.validateFiles(); err != nil {
+		return manifest, err
+	}
+	return manifest, manifest.validateRoot()
+}
+
+func (manifest LocalManifest) validateFiles() error {
+	if manifest.TransferID <= 0 {
+		return fmt.Errorf("invalid manifest transfer ID %d", manifest.TransferID)
 	}
 	seen := make(map[string]bool, len(manifest.Files))
 	for _, file := range manifest.Files {
 		name := filepath.FromSlash(file.Name)
 		if !safeManifestPath(name) || file.Length < 0 {
-			return manifest, fmt.Errorf("unsafe manifest entry %q (length %d)", file.Name, file.Length)
+			return fmt.Errorf("unsafe manifest entry %q (length %d)", file.Name, file.Length)
 		}
 		root, _, hasFile := strings.Cut(name, string(filepath.Separator))
 		if !hasFile || IsReservedTransferName(root) {
-			return manifest, fmt.Errorf("unsafe manifest root in %q", file.Name)
-		}
-		rel, err := filepath.Rel(manifest.LocalRoot, name)
-		if err != nil || !safeManifestPath(rel) {
-			return manifest, fmt.Errorf("manifest file %q is outside local root %q", file.Name, manifest.LocalRoot)
+			return fmt.Errorf("unsafe manifest root in %q", file.Name)
 		}
 		if seen[name] {
-			return manifest, fmt.Errorf("duplicate manifest file %q", file.Name)
+			return fmt.Errorf("duplicate manifest file %q", file.Name)
 		}
 		seen[name] = true
 	}
-	return manifest, nil
+	return nil
+}
+
+func (manifest LocalManifest) validateRoot() error {
+	if manifest.LocalRoot == "" {
+		return nil
+	}
+	if !safeManifestPath(manifest.LocalRoot) || IsReservedTransferName(strings.Split(manifest.LocalRoot, string(filepath.Separator))[0]) {
+		return fmt.Errorf("unsafe manifest root %q", manifest.LocalRoot)
+	}
+	for _, file := range manifest.Files {
+		name := filepath.FromSlash(file.Name)
+		rel, err := filepath.Rel(manifest.LocalRoot, name)
+		if err != nil || !safeManifestPath(rel) {
+			return fmt.Errorf("manifest file %q is outside local root %q", file.Name, manifest.LocalRoot)
+		}
+	}
+	return nil
 }
 
 func safeManifestPath(path string) bool {
@@ -60,37 +91,23 @@ func safeManifestPath(path string) bool {
 }
 
 // A legacy array records only file paths, never how many of their components
-// formed the transfer root. Ownership is therefore the deepest directory every
-// entry shares, unless the remote name still matches a shallower shared
-// directory. A drifted name can never widen the claim to an ancestor holding
-// files this transfer did not download.
-func legacyLocalRoot(files []TransferFile, remoteName string) string {
-	common := manifestDirs(files[0].Name)
-	for _, file := range files[1:] {
+// formed the transfer root. An entry sitting directly inside the root proves
+// where it ends; below that the boundary is unknowable, and the mutable remote
+// display name is not evidence, so ownership is refused instead of inferred.
+func legacyLocalRoot(files []TransferFile) (string, error) {
+	root, _, _ := strings.Cut(filepath.FromSlash(files[0].Name), string(filepath.Separator))
+	proven := false
+	for _, file := range files {
 		dirs := manifestDirs(file.Name)
-		if len(dirs) < len(common) {
-			common = common[:len(dirs)]
+		if len(dirs) == 0 || dirs[0] != root {
+			return "", fmt.Errorf("legacy manifest files do not share one local root")
 		}
-		for i := range common {
-			if common[i] != dirs[i] {
-				common = common[:i]
-				break
-			}
-		}
+		proven = proven || len(dirs) == 1
 	}
-	if len(common) == 0 {
-		root, _, _ := strings.Cut(filepath.FromSlash(files[0].Name), string(filepath.Separator))
-		return root
+	if !proven {
+		return "", fmt.Errorf("ambiguous legacy manifest root below %q", root)
 	}
-	if remoteName != "" {
-		name := filepath.Clean(filepath.FromSlash(remoteName))
-		for i := range common {
-			if filepath.Join(common[:i+1]...) == name {
-				return name
-			}
-		}
-	}
-	return filepath.Join(common...)
+	return root, nil
 }
 
 func manifestDirs(name string) []string {
@@ -119,8 +136,8 @@ const (
 	// being written, including a root that does not exist yet.
 	ManifestCheckPending ManifestCheck = iota
 	// ManifestCheckProcessed reports historical metadata for a transfer this
-	// instance already downloaded. The stored root must still be present, but
-	// individual child payloads may have been imported, renamed or resized.
+	// instance already downloaded. The payload may have been imported, renamed
+	// or resized, and an unchanged-name root may be gone altogether.
 	ManifestCheckProcessed
 	// ManifestCheckComplete requires every manifest file at its exact length.
 	ManifestCheckComplete
@@ -193,9 +210,7 @@ func (m *Manager) readManifests() *manifestSnapshot {
 		}
 		manifest, err := m.transferFiles.loadManifest(id)
 		if err == nil {
-			// Validate without adopting an inferred root: only the transfer
-			// being read supplies the remote name that resolves a legacy claim.
-			_, err = manifest.resolve("")
+			_, err = manifest.validate()
 		}
 		if err != nil {
 			snapshot.errors[id] = err
@@ -229,7 +244,7 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 	// processing-time name. Reading never rewrites the ownership record.
 	manifest.RemoteName = transfer.Name
 	claim := manifest.claimedRoot()
-	manifest, err := manifest.resolve(transfer.Name)
+	manifest, err := manifest.resolve()
 	if err != nil || len(manifest.Files) == 0 {
 		return manifest, err
 	}
@@ -249,9 +264,10 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 		return manifest, fmt.Errorf("open download root: %w", err)
 	}
 	defer root.Close()
-	// A newly queued unchanged-name transfer may not have created its root yet.
-	// Name drift requires an existing root; never create a replacement for it.
-	rootRequired := check != ManifestCheckPending || manifest.LocalRoot != transfer.Name
+	// An unchanged-name transfer may not have created its root yet, and an
+	// importer may have moved the finished payload out and removed it again.
+	// Name drift always requires the root; never create a replacement for it.
+	rootRequired := check == ManifestCheckComplete || manifest.LocalRoot != transfer.Name
 	if err := checkManifestPath(root, localRoot, true, rootRequired, 0, check); err != nil {
 		return manifest, err
 	}
@@ -337,7 +353,7 @@ func sortedManifestIDs[V any](m map[int64]V) []int64 {
 func ManifestLocalRoot(targetDir string, transfer *putio.Transfer) (string, error) {
 	manifest, err := newTransferFileStore(targetDir).loadManifest(transfer.ID)
 	if err == nil {
-		manifest, err = manifest.resolve(transfer.Name)
+		manifest, err = manifest.resolve()
 	}
 	if err != nil {
 		return "", fmt.Errorf("manifest ownership for transfer %d: %w", transfer.ID, err)
