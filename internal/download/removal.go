@@ -254,6 +254,25 @@ func (m *Manager) pruneStaleManifests(snapshot *manifestSnapshot, transfers []*p
 			log.Warn("transfers").Int64("transfer_id", id).
 				Msg("Reclaiming manifest of a transfer absent from Put.io whose root collides with a listed transfer")
 			m.RemoveTransfer(id)
+			m.categories.Remove(id)
 		}
 	}
+}
+
+func (m *Manager) recordListing(transfers []*putio.Transfer) {
+	listed := make(map[int64]bool, len(transfers))
+	for _, transfer := range transfers {
+		listed[transfer.ID] = true
+	}
+	m.listedMu.Lock()
+	m.listed = listed
+	m.listedMu.Unlock()
+}
+
+// confirmedAbsent reports whether the last successful account-wide listing
+// lacked id. Without any listing nothing is confirmed.
+func (m *Manager) confirmedAbsent(id int64) bool {
+	m.listedMu.RLock()
+	defer m.listedMu.RUnlock()
+	return m.listed != nil && !m.listed[id]
 }

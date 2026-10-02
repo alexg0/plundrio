@@ -651,7 +651,8 @@ failing only on the local step. A name that claims nothing is
 still removed as before. A manifest whose transfer is absent from a successful account-wide
 Put.io listing, and whose root collides with a listed transfer not held for
 review, is stale: the next poll releases that record through the same reclaim
-used for completed removals, leaving its local files in place, so a re-grab of
+used for completed removals, also dropping its stored category but leaving its
+local files in place, so a re-grab of
 the same release can proceed. Two listed transfers with duplicate or overlapping names need
 operator resolution — remove or rename one side, or write an explicit
 `localRoot` — since plundrio never renames directories, reassigns ownership or
@@ -665,10 +666,16 @@ different first components is malformed in the same sense: it holds files in
 more than one local root and cannot say which one it owns, so it is never read
 as a claim on just one of them. Ownership therefore fails closed for every
 transfer whose root or deletion candidate overlaps any root or entry the record
-names. A record that cannot be decoded at all, or that names a path escaping
-the download root, bounds nothing: while such a file exists, `torrent-get` file
-listings and local-data deletion are refused for every transfer in that
-download root, not only the corrupt one.
+names. A record that cannot be decoded at all, or that names any path that is
+not a clean local path (including one such as `Prefix/../Other/file` that climbs
+back out of its first component), bounds nothing: while such a file exists,
+`torrent-get` file listings and local-data deletion are refused for every
+transfer in that download root, not only the corrupt one. The exception is a
+record whose transfer ID is absent from the last successful account-wide Put.io
+transfer listing: it then claims nothing and stops blocking other transfers.
+Before the first successful listing, or while the transfer is still listed, it
+keeps refusing. The record itself is left in place, and its own transfer still
+reports the error.
 Reconciliation reads each listed transfer's own record and refuses when that
 record is unreadable. Once a transfer is released for removal its category
 lives only in `.plundrio-files/<id>.removing.json`, so an unreadable or

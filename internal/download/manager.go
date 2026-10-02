@@ -39,6 +39,9 @@ type Manager struct {
 	downloadRetryAttempts sync.Map             // map[int64]int - bounded local retry rounds by FileID
 	downloadRetryDelay    func(int) (time.Duration, bool)
 
+	listedMu sync.RWMutex   // guards listed
+	listed   map[int64]bool // IDs in the last successful account-wide listing; nil before one
+
 	ctx    context.Context
 	cancel context.CancelFunc
 

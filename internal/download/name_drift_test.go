@@ -926,6 +926,7 @@ func TestManifestStaleCollisionReclaimedForRegrab(t *testing.T) {
 			m := newManagerForTest(t, client)
 			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", stale)
 			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/303.json", unrelated)
+			m.SetCategory(101, "tv")
 			driftWrite(t, m.cfg.TargetDir, "Show/ep1.mkv", "one")
 			driftWrite(t, m.cfg.TargetDir, "Other/ep1.mkv", "two")
 			show := driftSnapshot(t, filepath.Join(m.cfg.TargetDir, "Show"))
@@ -948,6 +949,9 @@ func TestManifestStaleCollisionReclaimedForRegrab(t *testing.T) {
 				if _, err := os.Lstat(m.transferFiles.path(101)); !os.IsNotExist(err) {
 					t.Fatalf("stale colliding manifest was not reclaimed: %v", err)
 				}
+				if category := m.GetCategory(101); category != "" {
+					t.Fatalf("reclaimed transfer kept category %q", category)
+				}
 				manifest, err := m.GetTransferManifest(regrab, ManifestCheckComplete)
 				if err != nil || manifest.LocalRoot != "Show" {
 					t.Fatalf("re-grab did not take ownership: %+v %v", manifest, err)
@@ -963,7 +967,8 @@ func TestManifestStaleCollisionReclaimedForRegrab(t *testing.T) {
 
 // A decoded but invalid record bounds what it could claim, so it refuses only
 // transfers overlapping those roots. A record that cannot be decoded at all has
-// no knowable claim and still refuses every transfer.
+// no knowable claim and refuses every transfer until a successful account-wide
+// listing confirms its transfer is gone.
 func TestManifestUnreadableRecordRefusesOnlyOverlappingTransfers(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -973,31 +978,70 @@ func TestManifestUnreadableRecordRefusesOnlyOverlappingTransfers(t *testing.T) {
 		{name: "duplicate entries", broken: `[{"name":"Broken/a.mkv","length":3},{"name":"Broken/a.mkv","length":3}]`, unrelated: true},
 		{name: "negative length", broken: `{"version":1,"transferId":101,"localRoot":"Broken","files":[{"name":"Broken/a.mkv","length":-1}]}`, unrelated: true},
 		{name: "unsafe entry", broken: `[{"name":"../Broken/a.mkv","length":3}]`},
+		{name: "unsafe parent entry", broken: `[{"name":"Broken/../Other/b.mkv","length":3}]`},
 		{name: "truncated", broken: `[{"name":"Broken/a.mkv","len`},
 		{name: "empty file", broken: ``},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m := newManagerForTest(t, nil)
-			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", tc.broken)
-			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/202.json", `[{"name":"Other/b.mkv","length":3}]`)
-			driftWrite(t, m.cfg.TargetDir, "Broken/a.mkv", "one")
-			driftWrite(t, m.cfg.TargetDir, "Other/b.mkv", "two")
-			before := driftSnapshot(t, m.cfg.TargetDir)
-			for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
-				manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 202, Name: "renamed"}, check)
-				if tc.unrelated && (err != nil || manifest.LocalRoot != "Other") {
-					t.Fatalf("check %d: unrelated transfer failed closed: %+v %v", check, manifest, err)
+		for _, listing := range []string{"none", "owner listed", "owner absent"} {
+			t.Run(tc.name+"/"+listing, func(t *testing.T) {
+				var client PutioClient
+				if listing != "none" {
+					listed := []*putio.Transfer{{ID: 909, Name: "elsewhere", Status: "COMPLETED", SaveParentID: testFolderID + 1}}
+					if listing == "owner listed" {
+						listed = append(listed, &putio.Transfer{ID: 101, Name: "elsewhere", Status: "COMPLETED", SaveParentID: testFolderID + 1})
+					}
+					client = &fakeClient{transfers: func() ([]*putio.Transfer, error) { return listed, nil }}
 				}
-				if !tc.unrelated && (err == nil || !strings.Contains(err.Error(), "manifest 101")) {
-					t.Fatalf("check %d: unbounded record stopped guarding: %+v %v", check, manifest, err)
+				m := newManagerForTest(t, client)
+				driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", tc.broken)
+				driftWrite(t, m.cfg.TargetDir, ".plundrio-files/202.json", `[{"name":"Other/b.mkv","length":3}]`)
+				driftWrite(t, m.cfg.TargetDir, "Broken/a.mkv", "one")
+				driftWrite(t, m.cfg.TargetDir, "Other/b.mkv", "two")
+				if client != nil {
+					m.processor.checkTransfers()
+					m.processorWg.Wait()
 				}
-				if _, err := m.GetTransferManifest(&putio.Transfer{ID: 303, Name: "broken"}, check); err == nil || !strings.Contains(err.Error(), "manifest 101") {
-					t.Fatalf("check %d: overlapping transfer was not refused: %v", check, err)
+				before := driftSnapshot(t, m.cfg.TargetDir)
+				released := tc.unrelated || listing == "owner absent"
+				for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+					manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 202, Name: "renamed"}, check)
+					if released && (err != nil || manifest.LocalRoot != "Other") {
+						t.Fatalf("check %d: unrelated transfer failed closed: %+v %v", check, manifest, err)
+					}
+					if !released && (err == nil || !strings.Contains(err.Error(), "manifest 101")) {
+						t.Fatalf("check %d: unbounded record stopped guarding: %+v %v", check, manifest, err)
+					}
+					if tc.unrelated || listing != "owner absent" {
+						if _, err := m.GetTransferManifest(&putio.Transfer{ID: 303, Name: "broken"}, check); err == nil || !strings.Contains(err.Error(), "manifest 101") {
+							t.Fatalf("check %d: overlapping transfer was not refused: %v", check, err)
+						}
+					}
+					if _, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "Broken"}, check); err == nil {
+						t.Fatalf("check %d: unreadable record's own transfer was not refused", check)
+					}
 				}
-			}
-			driftUnchanged(t, m.cfg.TargetDir, before)
-		})
+				driftUnchanged(t, m.cfg.TargetDir, before)
+			})
+		}
 	}
+}
+
+// A path that climbs back out of its first component bounds nothing, so the
+// record must keep guarding the area it actually reaches.
+func TestManifestUnsafeParentPathKeepsGuardingReachedRoot(t *testing.T) {
+	m := newManagerForTest(t, nil)
+	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", `[{"name":"Prefix/../Other/file.epub","length":4}]`)
+	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/202.json", `[{"name":"Other/control.epub","length":4}]`)
+	driftWrite(t, m.cfg.TargetDir, "Other/file.epub", "book")
+	driftWrite(t, m.cfg.TargetDir, "Other/control.epub", "safe")
+	before := driftSnapshot(t, m.cfg.TargetDir)
+	for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+		manifest, err := m.GetTransferManifest(&putio.Transfer{ID: 202, Name: "Other"}, check)
+		if err == nil || !strings.Contains(err.Error(), "manifest 101") {
+			t.Errorf("check %d: unsafe parent path lost its possible Other claim: %+v %v", check, manifest, err)
+		}
+	}
+	driftUnchanged(t, m.cfg.TargetDir, before)
 }
 
 // Every stored record's category is resolved once per snapshot, so a

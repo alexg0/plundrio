@@ -104,6 +104,7 @@ func (p *TransferProcessor) checkTransfers() {
 		log.Error("transfers").Err(err).Msg("Failed to get transfers")
 		return
 	}
+	p.manager.recordListing(transfers)
 	p.manager.pruneRemovals(pending, transfers)
 	p.manager.pruneStaleManifests(stale, transfers)
 

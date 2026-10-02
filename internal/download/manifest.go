@@ -238,12 +238,17 @@ func (m *Manager) readManifests() *manifestSnapshot {
 		manifest, err := m.transferFiles.loadManifest(id)
 		if err != nil {
 			snapshot.errors[id] = err
-			snapshot.claims[id] = manifestClaim{err: fmt.Errorf("manifest %d: %w", id, err)}
+			if !m.confirmedAbsent(id) {
+				snapshot.claims[id] = manifestClaim{err: fmt.Errorf("manifest %d: %w", id, err)}
+			}
 			continue
 		}
 		if _, err := manifest.validate(); err != nil {
 			snapshot.errors[id] = err
-			snapshot.claims[id] = snapshot.resolveClaim(id, manifest.possibleRoots(), fmt.Errorf("manifest %d: %w", id, err))
+			roots := manifest.possibleRoots()
+			if roots != nil || !m.confirmedAbsent(id) {
+				snapshot.claims[id] = snapshot.resolveClaim(id, roots, fmt.Errorf("manifest %d: %w", id, err))
+			}
 			continue
 		}
 		snapshot.manifests[id] = manifest
@@ -255,7 +260,8 @@ func (m *Manager) readManifests() *manifestSnapshot {
 }
 
 // resolveClaim qualifies roots with the record's category. No roots means the
-// record's area is unknown, so unknownErr then blocks every transfer.
+// record's area is unknown, so unknownErr then blocks every transfer unless a
+// successful account-wide listing confirmed the record's transfer is gone.
 func (s *manifestSnapshot) resolveClaim(id int64, roots []string, unknownErr error) manifestClaim {
 	if len(roots) == 0 {
 		return manifestClaim{err: unknownErr}
@@ -275,7 +281,7 @@ func (s *manifestSnapshot) resolveClaim(id int64, roots []string, unknownErr err
 }
 
 // possibleRoots lists the first component of every root and entry a decoded
-// but invalid record names, or nil when any of them escapes a safe local path
+// but invalid record names, or nil when any full path is not a safe local path
 // and so cannot bound what the record might claim.
 func (manifest LocalManifest) possibleRoots() []string {
 	names := make([]string, 0, len(manifest.Files)+1)
@@ -287,10 +293,11 @@ func (manifest LocalManifest) possibleRoots() []string {
 	}
 	roots := make([]string, 0, len(names))
 	for _, name := range names {
-		root, _, _ := strings.Cut(filepath.FromSlash(name), string(filepath.Separator))
-		if !safeManifestPath(root) {
+		name = filepath.FromSlash(name)
+		if !safeManifestPath(name) {
 			return nil
 		}
+		root, _, _ := strings.Cut(name, string(filepath.Separator))
 		roots = append(roots, root)
 	}
 	return roots
