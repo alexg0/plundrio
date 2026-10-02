@@ -671,11 +671,12 @@ not a clean local path (including one such as `Prefix/../Other/file` that climbs
 back out of its first component), bounds nothing: while such a file exists,
 `torrent-get` file listings and local-data deletion are refused for every
 transfer in that download root, not only the corrupt one. The exception is a
-record whose transfer ID is absent from the last successful account-wide Put.io
+record whose transfer ID is absent from the latest successful account-wide Put.io
 transfer listing: it then claims nothing and stops blocking other transfers.
-Before the first successful listing, or while the transfer is still listed, it
-keeps refusing. The record itself is left in place, and its own transfer still
-reports the error.
+A failed listing invalidates that confirmation until a later listing succeeds.
+Before the first successful listing, after a failed listing, or while the
+transfer is still listed, it keeps refusing. The record itself is left in
+place, and its own transfer still reports the error.
 Reconciliation reads each listed transfer's own record and refuses when that
 record is unreadable. Once a transfer is released for removal its category
 lives only in `.plundrio-files/<id>.removing.json`, so an unreadable or

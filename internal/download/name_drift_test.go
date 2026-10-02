@@ -1026,6 +1026,46 @@ func TestManifestUnreadableRecordRefusesOnlyOverlappingTransfers(t *testing.T) {
 	}
 }
 
+// Absence confirmed by a successful poll stops authorizing other transfers
+// after a failed poll. A later successful listing can establish it again.
+func TestManifestUnreadableRecordListingFailureAndRecovery(t *testing.T) {
+	for _, broken := range []string{`{`, ``} {
+		t.Run(fmt.Sprintf("manifest=%q", broken), func(t *testing.T) {
+			var listErr error
+			transfer := &putio.Transfer{ID: 202, Name: "Other", Status: "DOWNLOADING", SaveParentID: testFolderID}
+			client := &fakeClient{transfers: func() ([]*putio.Transfer, error) {
+				return []*putio.Transfer{transfer}, listErr
+			}}
+			m := newManagerForTest(t, client)
+			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", broken)
+			driftWrite(t, m.cfg.TargetDir, ".plundrio-files/202.json", `[{"name":"Other/file.epub","length":4}]`)
+			driftWrite(t, m.cfg.TargetDir, "Other/file.epub", "book")
+			before := driftSnapshot(t, m.cfg.TargetDir)
+			for _, phase := range []string{"success", "failure", "recovery"} {
+				t.Run(phase, func(t *testing.T) {
+					listErr = nil
+					if phase == "failure" {
+						listErr = fmt.Errorf("account listing unavailable")
+					}
+					m.processor.checkTransfers()
+					m.processorWg.Wait()
+					for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+						manifest, err := m.GetTransferManifest(transfer, check)
+						if phase == "failure" {
+							if err == nil || !strings.Contains(err.Error(), "manifest 101") {
+								t.Errorf("check %d: failed listing retained absence confirmation: %+v %v", check, manifest, err)
+							}
+						} else if err != nil || manifest.LocalRoot != "Other" || len(manifest.Files) != 1 {
+							t.Errorf("check %d: successful listing did not confirm absence: %+v %v", check, manifest, err)
+						}
+					}
+					driftUnchanged(t, m.cfg.TargetDir, before)
+				})
+			}
+		})
+	}
+}
+
 // A path that climbs back out of its first component bounds nothing, so the
 // record must keep guarding the area it actually reaches.
 func TestManifestUnsafeParentPathKeepsGuardingReachedRoot(t *testing.T) {

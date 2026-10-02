@@ -269,8 +269,8 @@ func (m *Manager) recordListing(transfers []*putio.Transfer) {
 	m.listedMu.Unlock()
 }
 
-// confirmedAbsent reports whether the last successful account-wide listing
-// lacked id. Without any listing nothing is confirmed.
+// confirmedAbsent reports whether the latest account-wide listing succeeded
+// and lacked id. Before a listing or after a failed fetch nothing is confirmed.
 func (m *Manager) confirmedAbsent(id int64) bool {
 	m.listedMu.RLock()
 	defer m.listedMu.RUnlock()

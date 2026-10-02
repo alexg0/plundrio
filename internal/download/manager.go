@@ -40,7 +40,7 @@ type Manager struct {
 	downloadRetryDelay    func(int) (time.Duration, bool)
 
 	listedMu sync.RWMutex   // guards listed
-	listed   map[int64]bool // IDs in the last successful account-wide listing; nil before one
+	listed   map[int64]bool // IDs in the latest account-wide listing; nil before one or after a failure
 
 	ctx    context.Context
 	cancel context.CancelFunc

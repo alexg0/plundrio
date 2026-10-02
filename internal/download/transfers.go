@@ -101,6 +101,9 @@ func (p *TransferProcessor) checkTransfers() {
 	stale := p.manager.staleManifests()
 	transfers, err := p.manager.client.GetTransfers(p.manager.Context())
 	if err != nil {
+		p.manager.listedMu.Lock()
+		p.manager.listed = nil // Failed listings cannot confirm a corrupt record's owner is absent.
+		p.manager.listedMu.Unlock()
 		log.Error("transfers").Err(err).Msg("Failed to get transfers")
 		return
 	}
