@@ -98,12 +98,14 @@ func (p *TransferProcessor) checkTransfers() {
 	log.Debug("transfers").Msg("Checking transfers")
 
 	pending := p.manager.pendingRemovals()
+	stale := p.manager.staleManifests()
 	transfers, err := p.manager.client.GetTransfers(p.manager.Context())
 	if err != nil {
 		log.Error("transfers").Err(err).Msg("Failed to get transfers")
 		return
 	}
 	p.manager.pruneRemovals(pending, transfers)
+	p.manager.pruneStaleManifests(stale, transfers)
 
 	log.Debug("transfers").
 		Int("api_transfers_count", len(transfers)).

@@ -571,9 +571,7 @@ Existing `.plundrio-files/<id>.json` arrays remain readable and are not rewritte
 on name changes. New downloads store a version-1 object with `transferId`,
 `localRoot`, and `files`. `localRoot` is the
 processing-time path; no remote display name is persisted, since the latest poll
-already carries it and a stored copy would only go stale. Objects written by an
-earlier build that also contain `remoteName` or `hash` fields stay readable and
-are left byte-identical. A changed or newly populated remote hash does not
+already carries it and a stored copy would only go stale. A changed or newly populated remote hash does not
 invalidate the same numeric ID's manifest; RPC hash selectors use the current
 remote hash, and a matching hash never grants another ID ownership. A legacy
 array records no root at all, only file paths.
@@ -622,14 +620,15 @@ to be regular and exactly the expected length. Size checks do not prove content
 integrity. A transfer this instance already processed keeps reporting its stored
 metadata after an Arr import renames, moves or truncates the payload, including
 the case where the import took the last child and removed the owned root itself.
-That tolerance is limited to an unchanged remote name in the process that
-performed the download: once the name has drifted, the root must exist, and a
-restarted instance that no longer tracks the transfer requires every recorded
-file at its exact length. A first download whose remote name is not already a
+That tolerance applies, whatever the current remote name, in the process that
+performed the download; a pending download whose name has drifted requires its
+root, and a restarted instance that no longer tracks the transfer requires every
+recorded file at its exact length. A first download whose remote name is not already a
 clean relative path — a trailing separator, `./x`, `a//b` — is refused the same
-way until the name settles; no substitute root is created for it. Removing a transfer whose root was never created —
-queued or cancelled before the first local byte, name unchanged — deletes the
-remote records and nothing locally, and never creates a substitute root.
+way until the name settles; no substitute root is created for it. Removing a transfer whose root is absent —
+queued before the first local byte, or removed by an importer before or after a
+remote rename — deletes the remote records and nothing locally, and never
+creates a substitute root.
 Ownership, collision, confinement and symlink checks stay strict in every mode. No missing
 manifest is reconstructed by scanning the download directory, and no files are
 moved or deleted by these checks. Existing review and removal operations remain
@@ -649,7 +648,11 @@ cannot resolve to a directory inside the download root at all (empty, `.`,
 traversing outside it, or a reserved state name) proves no boundary either and
 is refused the same way, instead of deleting the remote records first and
 failing only on the local step. A name that claims nothing is
-still removed as before. Two transfers with duplicate or overlapping names need
+still removed as before. A manifest whose transfer is absent from a successful account-wide
+Put.io listing, and whose root collides with a listed transfer not held for
+review, is stale: the next poll releases that record through the same reclaim
+used for completed removals, leaving its local files in place, so a re-grab of
+the same release can proceed. Two listed transfers with duplicate or overlapping names need
 operator resolution — remove or rename one side, or write an explicit
 `localRoot` — since plundrio never renames directories, reassigns ownership or
 rewrites manifests to break the tie.
@@ -660,16 +663,19 @@ An unreadable or malformed `.plundrio-files/<id>.json` still claims a local root
 and that claim cannot safely be excluded. A record whose entries name several
 different first components is malformed in the same sense: it holds files in
 more than one local root and cannot say which one it owns, so it is never read
-as a claim on just one of them. Ownership therefore fails closed: while
-such a file exists, `torrent-get` file listings and local-data deletion are
-refused for every transfer in that download root, not only the corrupt one.
+as a claim on just one of them. Ownership therefore fails closed for every
+transfer whose root or deletion candidate overlaps any root or entry the record
+names. A record that cannot be decoded at all, or that names a path escaping
+the download root, bounds nothing: while such a file exists, `torrent-get` file
+listings and local-data deletion are refused for every transfer in that
+download root, not only the corrupt one.
 Reconciliation reads each listed transfer's own record and refuses when that
 record is unreadable. Once a transfer is released for removal its category
 lives only in `.plundrio-files/<id>.removing.json`, so an unreadable or
 non-string marker leaves that transfer's local root unknown and fails closed the
 same way; it is never read as the empty category, which would place the root at
 the download root and leave the real payload unguarded against another
-transfer's deletion candidate. The error names the lowest-numbered unreadable manifest and
+transfer's deletion candidate. The error names the lowest-numbered blocking manifest and
 names the same one on every read, so repeated requests point at one record to
 repair rather than at whichever one a map iteration surfaced. Repair that file —
 restore it from a backup of `.plundrio-files/` or correct its JSON — to restore
@@ -707,8 +713,9 @@ root — with and without `UseCategoriesTarget`, including the symlinked-categor
 case — and for one whose name resolves nowhere inside the download root (with
 the unclaimed-name and unrelated-category controls that still remove), a malformed record
 holding several local roots failing closed for every transfer reachable through
-them in both entry orders, post-import metadata retention with its drifted-name
-and restart counter-cases, and reconciliation of drifted and orphaned ownership
+them in both entry orders, post-import metadata retention before and after a
+rename with its restart counter-case, reclamation of a stale colliding manifest
+for a re-grab, unreadable records refusing only overlapping transfers, and reconciliation of drifted and orphaned ownership
 records. Integrity assertions check retained file
 identity, contents, paths, permissions, modification times, and manifest bytes.
 

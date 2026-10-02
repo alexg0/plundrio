@@ -151,14 +151,16 @@ func TestHandleTorrentGetKeepsProcessedMetadataAfterImport(t *testing.T) {
 		t.Fatalf("imported-away root dropped historical metadata: %+v", torrents)
 	}
 
-	// A drifted remote name may not substitute a new root for the missing one,
-	// and a restarted instance that no longer tracks the transfer must not
-	// report completion it cannot see.
+	// A later remote rename changes nothing about that completed import: the
+	// stored root is still reported and no substitute root is created. A
+	// restarted instance that no longer tracks the transfer must not report
+	// completion it cannot see.
 	transfer.Name = "Renamed Book"
 	torrents = manifestRPC(t, &Server{cfg: cfg, dlService: service},
 		`{"ids":[101],"fields":["id","name","files","error","errorString"]}`)
-	if len(torrents) != 1 || torrents[0].Error != trErrorLocal || !strings.Contains(torrents[0].ErrorString, "stat manifest path") {
-		t.Fatalf("drifted name accepted an absent local root: %+v", torrents)
+	if len(torrents) != 1 || torrents[0].Error != 0 || torrents[0].Name != "Book" ||
+		len(torrents[0].Files) != 1 || torrents[0].Files[0].Name != "Book/book.m4b" {
+		t.Fatalf("drifted name dropped imported-away historical metadata: %+v", torrents)
 	}
 	if _, err := os.Lstat(filepath.Join(root, "Renamed Book")); !os.IsNotExist(err) {
 		t.Fatalf("drifted name created a substitute root: %v", err)

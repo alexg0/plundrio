@@ -134,7 +134,7 @@ func TestManifestNameDriftRPC(t *testing.T) {
 
 func TestManifestNameDriftStoredHashRPCAndRemoval(t *testing.T) {
 	root := t.TempDir()
-	const stored = `{"version":1,"transferId":101,"hash":"ABC123","localRoot":"old-root","files":[{"name":"old-root/file.epub","length":4}]}`
+	const stored = `{"version":1,"transferId":101,"localRoot":"old-root","files":[{"name":"old-root/file.epub","length":4}]}`
 	writeManifestFixture(t, root, ".plundrio-files/101.json", []byte(stored))
 	writeManifestFixture(t, root, "old-root/file.epub", []byte("book"))
 	before := localSnapshot(t, root)
@@ -284,16 +284,16 @@ func TestManifestNameDriftRemoveRefusesAmbiguousLegacyRoot(t *testing.T) {
 }
 
 // A transfer removed before its first local byte has a manifest but no local
-// root yet. With its remote identity and name unchanged, a securely resolved
-// absent root means there is nothing to delete, not unresolved ownership.
+// root yet, and an importer may have removed a processed root before Put.io
+// renamed the transfer. With the remote identity unchanged, a securely resolved
+// absent root means there is nothing to delete, whatever the current name.
 func TestTorrentRemoveQueuedTransferBeforeFirstByte(t *testing.T) {
 	for _, name := range []string{"queued-root", "new-root"} {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
-			const manifest = `{"version":1,"transferId":101,"hash":"ABC123","localRoot":"queued-root","remoteName":"queued-root","files":[{"name":"queued-root/file.epub","length":4}]}`
+			const manifest = `{"version":1,"transferId":101,"localRoot":"queued-root","files":[{"name":"queued-root/file.epub","length":4}]}`
 			writeManifestFixture(t, root, ".plundrio-files/101.json", []byte(manifest))
 			writeManifestFixture(t, root, "unrelated/keep.epub", []byte("keep"))
-			before := localSnapshot(t, root)
 
 			cfg := &config.Config{TargetDir: root}
 			transfers := []*putio.Transfer{{ID: 101, Hash: "ABC123", Name: name, FileID: 501, Status: "DOWNLOADING", PercentDone: 0}}
@@ -301,25 +301,16 @@ func TestTorrentRemoveQueuedTransferBeforeFirstByte(t *testing.T) {
 			manager := download.New(cfg, nil)
 			srv := &Server{cfg: cfg, client: client, dlService: &manifestRPCService{Manager: manager, transfers: transfers}}
 
-			_, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[101],"delete-local-data":true}`))
-			if name == "new-root" {
-				if err == nil || !strings.Contains(err.Error(), "establish local ownership for transfer 101; nothing was removed") {
-					t.Fatalf("drifted name with missing root did not refuse removal: %v", err)
-				}
-				if len(client.deleted) != 0 || len(client.deletedFiles) != 0 {
-					t.Fatalf("refused removal still mutated Put.io: transfers=%v files=%v", client.deleted, client.deletedFiles)
-				}
-				localUnchanged(t, root, before)
-				return
-			}
-			if err != nil {
-				t.Fatalf("queued removal refused before any local root existed: %v", err)
+			if _, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(`{"ids":[101],"delete-local-data":true}`)); err != nil {
+				t.Fatalf("removal refused with no local root: %v", err)
 			}
 			if len(client.deleted) != 1 || client.deleted[0] != 101 {
-				t.Fatalf("queued removal did not delete the remote transfer: %v", client.deleted)
+				t.Fatalf("removal did not delete the remote transfer: %v", client.deleted)
 			}
-			if _, err := os.Lstat(filepath.Join(root, "queued-root")); !os.IsNotExist(err) {
-				t.Fatalf("removal created the absent local root: %v", err)
+			for _, dir := range []string{"queued-root", "new-root"} {
+				if _, err := os.Lstat(filepath.Join(root, dir)); !os.IsNotExist(err) {
+					t.Fatalf("removal created local root %q: %v", dir, err)
+				}
 			}
 			if data, err := os.ReadFile(filepath.Join(root, "unrelated/keep.epub")); err != nil || string(data) != "keep" {
 				t.Fatalf("removal deleted unrelated local data: %q %v", data, err)

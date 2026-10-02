@@ -135,7 +135,7 @@ const (
 	ManifestCheckPending ManifestCheck = iota
 	// ManifestCheckProcessed reports historical metadata for a transfer this
 	// instance already downloaded. The payload may have been imported, renamed
-	// or resized, and an unchanged-name root may be gone altogether.
+	// or resized, and its root may be gone altogether, whatever the remote name.
 	ManifestCheckProcessed
 	// ManifestCheckComplete requires every manifest file at its exact length.
 	ManifestCheckComplete
@@ -178,8 +178,16 @@ type manifestSnapshot struct {
 	targetDir string
 	manifests map[int64]LocalManifest
 	category  func(int64) (string, error)
+	claims    map[int64]manifestClaim
 	errors    map[int64]error
 	scanErr   error
+}
+
+// manifestClaim is every category-qualified root one stored record could own,
+// resolved once per snapshot. err is set when that area cannot be bounded.
+type manifestClaim struct {
+	roots []string
+	err   error
 }
 
 func (m *Manager) TransferFileReader() TransferFileReader {
@@ -190,7 +198,7 @@ func (m *Manager) TransferFileReader() TransferFileReader {
 
 // Caller holds transferFiles.mu, including across publication of a new claim.
 func (m *Manager) readManifests() *manifestSnapshot {
-	snapshot := &manifestSnapshot{targetDir: m.cfg.TargetDir, manifests: make(map[int64]LocalManifest), category: m.localCategory, errors: make(map[int64]error)}
+	snapshot := &manifestSnapshot{targetDir: m.cfg.TargetDir, manifests: make(map[int64]LocalManifest), category: m.localCategory, claims: make(map[int64]manifestClaim), errors: make(map[int64]error)}
 	root, err := os.OpenRoot(m.cfg.TargetDir)
 	if os.IsNotExist(err) {
 		return snapshot
@@ -228,16 +236,64 @@ func (m *Manager) readManifests() *manifestSnapshot {
 			continue
 		}
 		manifest, err := m.transferFiles.loadManifest(id)
-		if err == nil {
-			_, err = manifest.validate()
-		}
 		if err != nil {
 			snapshot.errors[id] = err
+			snapshot.claims[id] = manifestClaim{err: fmt.Errorf("manifest %d: %w", id, err)}
+			continue
+		}
+		if _, err := manifest.validate(); err != nil {
+			snapshot.errors[id] = err
+			snapshot.claims[id] = snapshot.resolveClaim(id, manifest.possibleRoots(), fmt.Errorf("manifest %d: %w", id, err))
 			continue
 		}
 		snapshot.manifests[id] = manifest
+		if len(manifest.Files) > 0 {
+			snapshot.claims[id] = snapshot.resolveClaim(id, []string{manifest.claimedRoot()}, nil)
+		}
 	}
 	return snapshot
+}
+
+// resolveClaim qualifies roots with the record's category. No roots means the
+// record's area is unknown, so unknownErr then blocks every transfer.
+func (s *manifestSnapshot) resolveClaim(id int64, roots []string, unknownErr error) manifestClaim {
+	if len(roots) == 0 {
+		return manifestClaim{err: unknownErr}
+	}
+	category, err := s.category(id)
+	if err != nil {
+		return manifestClaim{err: fmt.Errorf("category for manifest %d: %w", id, err)}
+	}
+	if category != "" && !safeManifestPath(category) {
+		return manifestClaim{err: fmt.Errorf("unsafe category for manifest %d", id)}
+	}
+	claim := manifestClaim{roots: make([]string, len(roots))}
+	for i, root := range roots {
+		claim.roots[i] = filepath.Join(category, root)
+	}
+	return claim
+}
+
+// possibleRoots lists the first component of every root and entry a decoded
+// but invalid record names, or nil when any of them escapes a safe local path
+// and so cannot bound what the record might claim.
+func (manifest LocalManifest) possibleRoots() []string {
+	names := make([]string, 0, len(manifest.Files)+1)
+	if manifest.LocalRoot != "" {
+		names = append(names, manifest.LocalRoot)
+	}
+	for _, file := range manifest.Files {
+		names = append(names, file.Name)
+	}
+	roots := make([]string, 0, len(names))
+	for _, name := range names {
+		root, _, _ := strings.Cut(filepath.FromSlash(name), string(filepath.Separator))
+		if !safeManifestPath(root) {
+			return nil
+		}
+		roots = append(roots, root)
+	}
+	return roots
 }
 
 func (s *manifestSnapshot) GetTransferManifest(transfer *putio.Transfer, check ManifestCheck) (LocalManifest, error) {
@@ -306,8 +362,9 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 	defer root.Close()
 	// An unchanged-name transfer may not have created its root yet, and an
 	// importer may have moved the finished payload out and removed it again.
-	// Name drift always requires the root; never create a replacement for it.
-	rootRequired := owned && (check == ManifestCheckComplete || manifest.LocalRoot != transfer.Name)
+	// A pending download after name drift requires the root; never create a
+	// replacement for it. A processed root that is gone has nothing to delete.
+	rootRequired := owned && (check == ManifestCheckComplete || (check == ManifestCheckPending && manifest.LocalRoot != transfer.Name))
 	if err := checkManifestPath(root, localRoot, true, rootRequired, 0, check); err != nil {
 		return manifest, err
 	}
@@ -350,31 +407,31 @@ func checkManifestPath(root *os.Root, path string, directory, required bool, len
 }
 
 func (s *manifestSnapshot) checkManifestCollision(id int64, root string) error {
-	if len(s.errors) > 0 {
-		lowest := sortedManifestIDs(s.errors)[0]
-		return fmt.Errorf("cannot establish ownership: manifest %d: %w", lowest, s.errors[lowest])
-	}
-	for _, otherID := range sortedManifestIDs(s.manifests) {
-		other := s.manifests[otherID]
-		if otherID == id || len(other.Files) == 0 {
+	for _, otherID := range sortedManifestIDs(s.claims) {
+		if otherID == id {
 			continue
 		}
-		category, err := s.category(otherID)
-		if err != nil {
-			return fmt.Errorf("cannot establish ownership: category for manifest %d: %w", otherID, err)
+		claim := s.claims[otherID]
+		if claim.err != nil {
+			return fmt.Errorf("cannot establish ownership: %w", claim.err)
 		}
-		if category != "" && !safeManifestPath(category) {
-			return fmt.Errorf("unsafe category for manifest %d", otherID)
-		}
-		otherRoot := filepath.Join(category, other.claimedRoot())
-		// Conservatively reject case-only aliases on both case-sensitive and
-		// case-insensitive volumes. Ancestor claims also collide across categories.
-		a, b := strings.ToLower(root), strings.ToLower(otherRoot)
-		if a == b || strings.HasPrefix(a, b+string(filepath.Separator)) || strings.HasPrefix(b, a+string(filepath.Separator)) {
-			return fmt.Errorf("local root %q collides with transfer %d root %q", root, otherID, otherRoot)
+		for _, otherRoot := range claim.roots {
+			if rootsOverlap(root, otherRoot) {
+				if s.errors[otherID] != nil {
+					return fmt.Errorf("cannot establish ownership: local root %q overlaps unreadable manifest %d root %q: %w", root, otherID, otherRoot, s.errors[otherID])
+				}
+				return fmt.Errorf("local root %q collides with transfer %d root %q", root, otherID, otherRoot)
+			}
 		}
 	}
 	return nil
+}
+
+// Conservatively reject case-only aliases on both case-sensitive and
+// case-insensitive volumes. Ancestor claims also collide across categories.
+func rootsOverlap(root, other string) bool {
+	a, b := strings.ToLower(root), strings.ToLower(other)
+	return a == b || strings.HasPrefix(a, b+string(filepath.Separator)) || strings.HasPrefix(b, a+string(filepath.Separator))
 }
 
 // Ownership diagnostics must name the same competing record on every read,
