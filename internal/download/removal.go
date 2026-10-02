@@ -79,11 +79,11 @@ func PendingRemovalPaths(targetDir string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("pending removal %d: %w", id, err)
 		}
-		files, ok := store.Get(id)
-		if !ok {
+		manifest, err := store.loadManifest(id)
+		if err != nil || len(manifest.Files) == 0 {
 			return nil, fmt.Errorf("pending removal %d has no readable authoritative manifest; resolve the pending removal before reconciliation", id)
 		}
-		for _, file := range files {
+		for _, file := range manifest.Files {
 			name := filepath.FromSlash(file.Name)
 			if !filepath.IsLocal(name) || filepath.Clean(name) != name || file.Length < 0 {
 				return nil, fmt.Errorf("pending removal %d has invalid manifest path %q", id, file.Name)

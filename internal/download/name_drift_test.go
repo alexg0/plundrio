@@ -414,13 +414,23 @@ func TestManifestNameDriftStoredHash(t *testing.T) {
 	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", `{"version":1,"transferId":101,"hash":"ABC123","localRoot":"old-root","remoteName":"old-root","files":[{"name":"old-root/book/file.epub","length":4}]}`)
 	driftWrite(t, m.cfg.TargetDir, "old-root/book/file.epub", "book")
 	before := driftSnapshot(t, m.cfg.TargetDir)
-	for _, hash := range []string{"abc123", "other-hash"} {
-		_, err := m.GetTransferManifest(&putio.Transfer{ID: 101, Name: "new-root", Hash: hash}, ManifestCheckComplete)
-		if hash == "abc123" && err != nil {
-			t.Fatal(err)
+	for _, hash := range []string{"", "abc123", "other-hash"} {
+		// Fresh managers reload the original JSON, including its historical
+		// hash, while the numeric ID remains the owner across polls.
+		fresh := New(m.cfg, nil)
+		transfer := &putio.Transfer{ID: 101, Name: "new-root", Hash: hash}
+		for _, check := range []ManifestCheck{ManifestCheckPending, ManifestCheckProcessed, ManifestCheckComplete} {
+			manifest, err := fresh.GetTransferManifest(transfer, check)
+			if err != nil || manifest.TransferID != 101 || manifest.LocalRoot != "old-root" || len(manifest.Files) != 1 {
+				t.Fatalf("hash %q check %d: same-ID manifest rejected: %+v %v", hash, check, manifest, err)
+			}
+			if _, err := fresh.GetTransferManifest(&putio.Transfer{ID: 202, Name: "old-root", Hash: hash}, check); err == nil || !strings.Contains(err.Error(), "collides with transfer 101") {
+				t.Fatalf("hash %q check %d: another ID claimed the root: %v", hash, check, err)
+			}
 		}
-		if hash == "other-hash" && (err == nil || !strings.Contains(err.Error(), "hash does not match")) {
-			t.Fatalf("changed hash accepted: %v", err)
+		local, err := fresh.prepareManifest(transfer, []*putio.File{{Name: "book/file.epub", Size: 4}})
+		if err != nil || local.Name != "old-root" {
+			t.Fatalf("hash %q: same-ID retry rejected: %+v %v", hash, local, err)
 		}
 	}
 	driftUnchanged(t, m.cfg.TargetDir, before)
@@ -704,9 +714,11 @@ func TestManifestNameDriftLiteralBackslashName(t *testing.T) {
 	if len(files) != 1 || files[0].Name != entry {
 		t.Fatalf("manifest = %+v, want single entry %q", files, entry)
 	}
-	if err := m.transferFiles.Set(101, files); err != nil {
-		t.Fatalf("literal name refused during manifest persistence: %v", err)
+	data, err := json.Marshal(files)
+	if err != nil {
+		t.Fatal(err)
 	}
+	driftWrite(t, m.cfg.TargetDir, ".plundrio-files/101.json", string(data))
 	driftWrite(t, m.cfg.TargetDir, filepath.Join(name, "file.mkv"), "one")
 	driftWrite(t, m.cfg.TargetDir, `Solo\Act/other.mkv`, "two")
 	before := driftSnapshot(t, m.cfg.TargetDir)
@@ -850,9 +862,6 @@ func TestManifestlessRestorationHoldsDuplicateNameForReview(t *testing.T) {
 		}
 		if !instance.NeedsReview(8) {
 			t.Fatal("review hold was not persisted for restart")
-		}
-		if files, ok := instance.GetTransferFiles(8); ok || len(files) != 0 {
-			t.Fatal("review invented a manifest")
 		}
 		if _, err := os.Lstat(instance.transferFiles.path(8)); !os.IsNotExist(err) {
 			t.Fatalf("review wrote a manifest for the held transfer: %v", err)

@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-
-	"github.com/elsbrock/plundrio/internal/log"
 )
 
 const transferFilesStateDirName = ".plundrio-files"
@@ -41,20 +39,6 @@ func newTransferFileStore(targetDir string) *TransferFileStore {
 
 func (fs *TransferFileStore) path(transferID int64) string {
 	return filepath.Join(fs.stateDir, strconv.FormatInt(transferID, 10)+".json")
-}
-
-// Set stores a transfer's complete expected file list in the legacy array format.
-func (fs *TransferFileStore) Set(transferID int64, files []TransferFile) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	if transferID <= 0 || len(files) == 0 {
-		return fmt.Errorf("transfer file manifest requires a transfer ID and at least one file")
-	}
-	data, err := json.Marshal(files)
-	if err != nil {
-		return fmt.Errorf("marshal transfer file state: %w", err)
-	}
-	return fs.write(transferID, data)
 }
 
 // New downloads record their actual root explicitly. Existing arrays are read
@@ -97,24 +81,6 @@ func (fs *TransferFileStore) write(transferID int64, data []byte) error {
 		return fmt.Errorf("write transfer file state: %w", err)
 	}
 	return nil
-}
-
-func (fs *TransferFileStore) Get(transferID int64) ([]TransferFile, bool) {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-	files, err := fs.load(transferID)
-	if err != nil {
-		log.Error("files").Err(err).Msg("Failed to load transfer file state")
-		return nil, false
-	}
-	return files, len(files) > 0
-}
-
-// load returns nil only for genuinely absent legacy state. Existing but
-// unreadable, malformed, or empty manifests must not authorize legacy completion.
-func (fs *TransferFileStore) load(transferID int64) ([]TransferFile, error) {
-	manifest, err := fs.loadManifest(transferID)
-	return manifest.Files, err
 }
 
 func (fs *TransferFileStore) loadManifest(transferID int64) (LocalManifest, error) {

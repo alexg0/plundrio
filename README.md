@@ -569,11 +569,14 @@ ID-only queue response does not verify the local files.
 
 Existing `.plundrio-files/<id>.json` arrays remain readable and are not rewritten
 on name changes. New downloads store a version-1 object with `transferId`,
-`hash` (when available), `localRoot`, and `files`. `localRoot` is the
+`localRoot`, and `files`. `localRoot` is the
 processing-time path; no remote display name is persisted, since the latest poll
 already carries it and a stored copy would only go stale. Objects written by an
-earlier build that also contain a `remoteName` field stay readable and are left
-byte-identical. A legacy array records no root at all, only file paths.
+earlier build that also contain `remoteName` or `hash` fields stay readable and
+are left byte-identical. A changed or newly populated remote hash does not
+invalidate the same numeric ID's manifest; RPC hash selectors use the current
+remote hash, and a matching hash never grants another ID ownership. A legacy
+array records no root at all, only file paths.
 Since manifest entries are written as `<root>/<file>`, a read without the remote
 listing accepts the shared first component exactly when some entry sits directly
 inside it: `old-root/file.epub` proves the root `old-root`, and that root is kept
@@ -714,6 +717,16 @@ changed-name happy-path cases with `outside transfer "new-root"`; unchanged-name
 and ID-only controls pass. To isolate that small demonstration, use
 `go test ./internal/server -run '^TestManifestNameDriftRPC$' -count=1 -v`.
 On the fixed implementation all four name/selector combinations pass.
+
+For same-ID hash changes, run:
+
+```sh
+go test ./internal/download ./internal/server -run 'ManifestNameDriftStoredHash' -count=1 -v
+```
+
+It verifies persisted reload and retry, current numeric/hash RPC selectors,
+unchanged manifest bytes, and refusal to let another numeric ID delete the owned
+root. Both packages end in `PASS` / `ok`.
 
 A backslash is an ordinary filename byte on the POSIX platforms plundrio
 targets, so `AC\DC - Album` is one directory name rather than a path, and it is

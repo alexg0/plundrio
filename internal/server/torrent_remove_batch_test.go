@@ -120,8 +120,9 @@ func TestTorrentRemoveContinuesBatchAfterFailure(t *testing.T) {
 				if got := manager.RemovalPending(transfer.ID); got != (tt.remoteFailures[transfer.ID] != nil) {
 					t.Errorf("transfer %d removal pending = %v", transfer.ID, got)
 				}
-				if _, present := manager.GetTransferFiles(transfer.ID); present != failed {
-					t.Errorf("transfer %d manifest present = %v, want %v", transfer.ID, present, failed)
+				_, err := os.Stat(filepath.Join(root, ".plundrio-files", fmt.Sprintf("%d.json", transfer.ID)))
+				if (failed && err != nil) || (!failed && !os.IsNotExist(err)) {
+					t.Errorf("transfer %d manifest stat = %v, want present=%v", transfer.ID, err, failed)
 				}
 				wantCategory := ""
 				if failed {

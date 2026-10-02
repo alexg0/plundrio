@@ -132,6 +132,40 @@ func TestManifestNameDriftRPC(t *testing.T) {
 	}
 }
 
+func TestManifestNameDriftStoredHashRPCAndRemoval(t *testing.T) {
+	root := t.TempDir()
+	const stored = `{"version":1,"transferId":101,"hash":"ABC123","localRoot":"old-root","files":[{"name":"old-root/file.epub","length":4}]}`
+	writeManifestFixture(t, root, ".plundrio-files/101.json", []byte(stored))
+	writeManifestFixture(t, root, "old-root/file.epub", []byte("book"))
+	before := localSnapshot(t, root)
+	cfg := &config.Config{TargetDir: root}
+	transfers := []*putio.Transfer{
+		{ID: 101, Hash: "DEF456", Name: "new-root", Status: "COMPLETED", PercentDone: 100},
+		// Matching the historical hash never grants another ID ownership.
+		{ID: 202, Hash: "ABC123", Name: "old-root", FileID: 502},
+	}
+	client := &torrentAddClient{transfers: transfers}
+	manager := download.New(cfg, nil)
+	srv := &Server{cfg: cfg, client: client, dlService: &manifestRPCService{Manager: manager, transfers: transfers}}
+	for _, selector := range []string{`101`, `"def456"`} {
+		got := manifestRPC(t, srv, fmt.Sprintf(`{"ids":[%s],"fields":["id","name","hashString","files","error","errorString"]}`, selector))
+		want := []transmissionFile{{Name: "old-root/file.epub", Length: 4}}
+		if len(got) != 1 || got[0].ID != 101 || got[0].HashString != "DEF456" || got[0].Name != "old-root" || got[0].Error != 0 || !reflect.DeepEqual(got[0].Files, want) {
+			t.Fatalf("same-ID hash change rejected via %s: %+v", selector, got)
+		}
+	}
+	for _, selector := range []string{`202`, `"abc123"`} {
+		_, err := srv.handleTorrentRemove(context.Background(), json.RawMessage(fmt.Sprintf(`{"ids":[%s],"delete-local-data":true}`, selector)))
+		if err == nil || !strings.Contains(err.Error(), "collides with transfer 101") {
+			t.Fatalf("another numeric ID could delete the owner's root via %s: %v", selector, err)
+		}
+	}
+	if len(client.deleted) != 0 || len(client.deletedFiles) != 0 || manager.RemovalPending(202) {
+		t.Fatal("refused removal mutated remote state or published a removal marker")
+	}
+	localUnchanged(t, root, before)
+}
+
 func TestManifestNameDriftMixedRPC(t *testing.T) {
 	root := t.TempDir()
 	writeManifestFixture(t, root, ".plundrio-files/101.json", []byte(`[{"name":"old-root/file.epub","length":4}]`))

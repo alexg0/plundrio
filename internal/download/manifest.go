@@ -18,7 +18,6 @@ import (
 // only source for that.
 type LocalManifest struct {
 	TransferID int64          `json:"transferId"`
-	Hash       string         `json:"hash,omitempty"`
 	LocalRoot  string         `json:"localRoot"`
 	Files      []TransferFile `json:"files"`
 }
@@ -269,9 +268,6 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 	if s.scanErr != nil {
 		return manifest, s.scanErr
 	}
-	if manifest.Hash != "" && transfer.Hash != "" && !strings.EqualFold(manifest.Hash, transfer.Hash) {
-		return manifest, fmt.Errorf("manifest hash does not match transfer %d", transfer.ID)
-	}
 	claim := manifest.claimedRoot()
 	manifest, err := manifest.resolve()
 	if err != nil {
@@ -444,7 +440,7 @@ func (m *Manager) prepareManifest(transfer *putio.Transfer, files []*putio.File)
 			}
 		}
 	} else {
-		manifest := LocalManifest{TransferID: transfer.ID, Hash: transfer.Hash, LocalRoot: filepath.Clean(transfer.Name), Files: expected}
+		manifest := LocalManifest{TransferID: transfer.ID, LocalRoot: filepath.Clean(transfer.Name), Files: expected}
 		if _, err := snapshot.validateManifest(&local, manifest, ManifestCheckPending); err != nil {
 			return nil, err
 		}

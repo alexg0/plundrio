@@ -281,7 +281,7 @@ func TestHandleTorrentRemoveBoundsFailuresAndRetainsOwnership(t *testing.T) {
 	if !manager.RemovalPending(101) {
 		t.Fatal("failed removal discarded its durable marker")
 	}
-	if _, ok := manager.GetTransferFiles(101); !ok {
+	if _, err := os.Stat(filepath.Join(root, ".plundrio-files", "101.json")); err != nil {
 		t.Fatal("durable manifest was discarded after remote deletion failed")
 	}
 	torrents := manifestRPC(t, server, `{"ids":[101],"fields":["id","status","error","errorString"]}`)
@@ -296,7 +296,7 @@ func TestHandleTorrentRemoveBoundsFailuresAndRetainsOwnership(t *testing.T) {
 	if manager.RemovalPending(101) {
 		t.Fatal("successful retry retained removal state")
 	}
-	if _, ok := manager.GetTransferFiles(101); ok {
+	if _, err := os.Stat(filepath.Join(root, ".plundrio-files", "101.json")); !os.IsNotExist(err) {
 		t.Fatal("successful retry retained the manifest")
 	}
 	if _, err := os.Stat(filepath.Join(root, "books", "Book", "book.m4b")); err != nil {
