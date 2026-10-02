@@ -86,9 +86,9 @@ Progress is split 50/50: put.io download (0-50%) + local download (50-100%). Thi
 
 A `Failed` transfer keeps its context only until the next poll: `shouldProcess`
 drops it so the transfer is retried, bounded by `maxReprocessAttempts` and
-deferred until no files are still in flight. Contexts are otherwise never
-removed, so `torrent-remove` is what keeps tracking state from growing for the
-process lifetime.
+deferred until no files are still in flight. Contexts are otherwise removed
+only by `torrent-remove` and by stale-manifest reclaim (`pruneStaleManifests`),
+so those are what keep tracking state from growing for the process lifetime.
 
 `NeedsReview` means source absence without a manifest, never verified completion
 or download failure. `.plundrio-files/<id>.review.json` holds original identity

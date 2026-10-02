@@ -65,13 +65,13 @@ func (fs *TransferFileStore) write(transferID int64, data []byte) error {
 	if err != nil {
 		return fmt.Errorf("write transfer file state: %w", err)
 	}
-	defer os.Remove(file.Name())
+	defer func() { _ = os.Remove(file.Name()) }()
 	if _, err := file.Write(data); err != nil {
-		file.Close()
+		_ = file.Close()
 		return fmt.Errorf("write transfer file state: %w", err)
 	}
 	if err := file.Sync(); err != nil {
-		file.Close()
+		_ = file.Close()
 		return fmt.Errorf("write transfer file state: %w", err)
 	}
 	if err := file.Close(); err != nil {
@@ -95,7 +95,7 @@ func (fs *TransferFileStore) loadManifest(transferID int64) (LocalManifest, erro
 	if err != nil {
 		return manifest, fmt.Errorf("open transfer file state root: %w", err)
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	path := filepath.Join(transferFilesStateDirName, strconv.FormatInt(transferID, 10)+".json")
 	// The state directory and manifest must themselves be real local entries.
 	for _, component := range []string{transferFilesStateDirName, path} {

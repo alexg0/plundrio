@@ -207,7 +207,7 @@ func (m *Manager) readManifests() *manifestSnapshot {
 		snapshot.scanErr = err
 		return snapshot
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	info, err := root.Lstat(transferFilesStateDirName)
 	if os.IsNotExist(err) {
 		return snapshot
@@ -225,7 +225,7 @@ func (m *Manager) readManifests() *manifestSnapshot {
 		snapshot.scanErr = err
 		return snapshot
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	entries, err := dir.ReadDir(-1)
 	if err != nil {
 		snapshot.scanErr = fmt.Errorf("read manifest ownership: %w", err)
@@ -366,7 +366,7 @@ func (s *manifestSnapshot) validateManifest(transfer *putio.Transfer, manifest L
 	if err != nil {
 		return manifest, fmt.Errorf("open download root: %w", err)
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	// An unchanged-name transfer may not have created its root yet, and an
 	// importer may have moved the finished payload out and removed it again.
 	// A pending download after name drift requires the root; never create a
